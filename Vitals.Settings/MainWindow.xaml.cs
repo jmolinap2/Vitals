@@ -8,6 +8,8 @@ namespace Vitals.Settings;
 
 public partial class MainWindow : Window
 {
+    private static readonly double[] ScalePresets = [0.85, 1.0, 1.25, 1.5];
+
     private readonly ObservableCollection<MetricRow> _rows;
 
     public MainWindow()
@@ -18,6 +20,15 @@ public partial class MainWindow : Window
         _rows = new ObservableCollection<MetricRow>(
             config.Metrics.Select(m => new MetricRow(m.Key, m.Enabled)));
         MetricsList.ItemsSource = _rows;
+
+        int closestIndex = 1;
+        double closestDiff = double.MaxValue;
+        for (int i = 0; i < ScalePresets.Length; i++)
+        {
+            double diff = Math.Abs(ScalePresets[i] - config.Scale);
+            if (diff < closestDiff) { closestDiff = diff; closestIndex = i; }
+        }
+        SizeCombo.SelectedIndex = closestIndex;
     }
 
     private void MoveUp_Click(object sender, RoutedEventArgs e)
@@ -39,6 +50,7 @@ public partial class MainWindow : Window
         var config = new VitalsConfig
         {
             Metrics = _rows.Select(r => new MetricEntry { Key = r.Key, Enabled = r.Enabled }).ToList(),
+            Scale = ScalePresets[Math.Max(SizeCombo.SelectedIndex, 0)],
         };
         config.Save();
 

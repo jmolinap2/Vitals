@@ -14,6 +14,7 @@ public sealed class MetricEntry
 public sealed class VitalsConfig
 {
     public List<MetricEntry> Metrics { get; set; } = DefaultOrder();
+    public double Scale { get; set; } = 1.0;
 
     public static List<MetricEntry> DefaultOrder() =>
     [

@@ -37,6 +37,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
@@ -47,7 +48,22 @@
                    FontSize="12" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,14"
                    TextWrapping="Wrap"/>
 
-        <ListBox x:Name="MetricsList" Grid.Row="2" Background="Transparent" BorderThickness="0">
+        <Grid Grid.Row="2" Margin="0,0,0,14">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Tamaño de la píldora" VerticalAlignment="Center"
+                       Foreground="{StaticResource TextBrush}" FontSize="14"/>
+            <ComboBox x:Name="SizeCombo" Grid.Column="1" Width="140" SelectedIndex="1">
+                <ComboBoxItem Content="Pequeño"/>
+                <ComboBoxItem Content="Normal"/>
+                <ComboBoxItem Content="Grande"/>
+                <ComboBoxItem Content="Muy grande"/>
+            </ComboBox>
+        </Grid>
+
+        <ListBox x:Name="MetricsList" Grid.Row="3" Background="Transparent" BorderThickness="0">
             <ListBox.ItemContainerStyle>
                 <Style TargetType="ListBoxItem">
                     <Setter Property="Padding" Value="0"/>
@@ -86,7 +102,7 @@
             </ListBox.ItemTemplate>
         </ListBox>
 
-        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
             <Button Content="Guardar y reiniciar Vitals" Padding="14,9" Click="Save_Click"
                     Background="{StaticResource AccentBrush}" Foreground="White" BorderThickness="0"
                     Style="{StaticResource IconButton}"/>

@@ -11,6 +11,7 @@ internal enum IconKind { Cpu, Gpu, Ram, Up, Down, Battery }
 internal sealed class RingBuffer(int capacity)
 {
     private readonly double[] _values = new double[capacity];
+    private readonly double[] _ordered = new double[capacity];
     private int _count;
     private int _head;
 
@@ -21,19 +22,27 @@ internal sealed class RingBuffer(int capacity)
         if (_count < _values.Length) _count++;
     }
 
-    public double[] Ordered()
+    // Repinta un buffer propio en cada llamada en vez de asignar un array
+    // nuevo — el repintado (animación incluida) ocurre varias veces por
+    // segundo, y este es precisamente un monitor de recursos.
+    public ReadOnlySpan<double> Ordered()
     {
-        var result = new double[_count];
         int start = (_head - _count + _values.Length) % _values.Length;
         for (int i = 0; i < _count; i++)
-            result[i] = _values[(start + i) % _values.Length];
-        return result;
+            _ordered[i] = _values[(start + i) % _values.Length];
+        return _ordered.AsSpan(0, _count);
     }
 
-    public double Max() => _count == 0 ? 0 : Ordered().Max();
+    public double Max()
+    {
+        double max = 0;
+        for (int i = 0; i < _count; i++)
+            if (_values[i] > max) max = _values[i];
+        return max;
+    }
 }
 
-internal readonly record struct Accent(uint Stroke, uint Fill, uint Text);
+internal readonly record struct Accent(uint Stroke, uint FillTop, uint FillBottom, uint Text);
 
 internal static class PillWindow
 {
@@ -45,7 +54,8 @@ internal static class PillWindow
     private const int HistoryLength = 30;
 
     private static List<MetricEntry> _enabledMetrics = [];
-    private static int _pillWidth;
+    private static int _pillWidth; // ancho lógico (sin escalar) — GDI+ escala todo con una sola transformación
+    private static double _scale = 1.0;
 
     private const nint DataTimerId = 1;
     private const nint AnimTimerId = 2;
@@ -76,7 +86,8 @@ internal static class PillWindow
 
     private static Accent MakeAccent(byte r, byte g, byte b) => new(
         Stroke: Gdip.Argb(255, r, g, b),
-        Fill: Gdip.Argb(46, r, g, b),
+        FillTop: Gdip.Argb(75, r, g, b),
+        FillBottom: Gdip.Argb(0, r, g, b),
         Text: Gdip.Argb(255, r, g, b));
 
     private static NOTIFYICONDATA _trayIcon;
@@ -95,6 +106,7 @@ internal static class PillWindow
         _enabledMetrics = config.Metrics.Where(m => m.Enabled).ToList();
         if (_enabledMetrics.Count == 0) _enabledMetrics = VitalsConfig.DefaultOrder();
         _pillWidth = _enabledMetrics.Count * ColumnPixelWidth;
+        _scale = Math.Clamp(config.Scale, 0.75, 1.6);
 
         nint hInstance = GetModuleHandle(null);
         var wndProcPtr = (nint)(delegate* unmanaged<nint, uint, nint, nint, nint>)&WndProc;
@@ -110,21 +122,25 @@ internal static class PillWindow
         };
         RegisterClassEx(ref wndClass);
 
+        int deviceWidth = (int)Math.Round(_pillWidth * _scale);
+        int deviceHeight = (int)Math.Round(PillHeight * _scale);
+        int deviceCorner = (int)Math.Round(CornerRadius * _scale);
+
         var workArea = new RECT();
         SystemParametersInfo(SPI_GETWORKAREA, 0, ref workArea, 0);
-        int x = workArea.Right - _pillWidth - ScreenMargin;
-        int y = workArea.Bottom - PillHeight - ScreenMargin;
+        int x = workArea.Right - deviceWidth - ScreenMargin;
+        int y = workArea.Bottom - deviceHeight - ScreenMargin;
 
         nint hwnd = CreateWindowEx(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             ClassName, "Vitals",
             WS_POPUP,
-            x, y, _pillWidth, PillHeight,
+            x, y, deviceWidth, deviceHeight,
             0, 0, hInstance, 0);
 
         if (hwnd == 0) return;
 
-        SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, _pillWidth, PillHeight, CornerRadius * 2, CornerRadius * 2), true);
+        SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, deviceWidth, deviceHeight, deviceCorner * 2, deviceCorner * 2), true);
         SetLayeredWindowAttributes(hwnd, 0, 250, LWA_ALPHA);
 
         _bgBrush = 0;
@@ -266,7 +282,7 @@ internal static class PillWindow
         nint memBmp = CreateCompatibleBitmap(hdc, client.Width, client.Height);
         nint oldBmp = SelectObject(memDc, memBmp);
 
-        Render(memDc, client);
+        Render(memDc);
 
         BitBlt(hdc, 0, 0, client.Width, client.Height, memDc, 0, 0, SRCCOPY);
 
@@ -276,17 +292,20 @@ internal static class PillWindow
         EndPaint(hWnd, ref ps);
     }
 
-    private static void Render(nint memDc, RECT client)
+    private static void Render(nint memDc)
     {
         Gdip.GdipCreateFromHDC(memDc, out nint g);
         Gdip.GdipSetSmoothingMode(g, Gdip.SmoothingModeAntiAlias);
         Gdip.GdipSetTextRenderingHint(g, Gdip.TextRenderingHintAntiAliasGridFit);
+        Gdip.GdipScaleWorldTransform(g, (float)_scale, (float)_scale, Gdip.MatrixOrderPrepend);
 
-        nint bgPath = Gdip.RoundRectPath(0, 0, client.Width, client.Height, CornerRadius);
+        // Todo lo que sigue dibuja en coordenadas lógicas (sin escalar) — la
+        // transformación de arriba ya mapea eso al tamaño real de ventana.
+        nint bgPath = Gdip.RoundRectPath(0, 0, _pillWidth, PillHeight, CornerRadius);
         Gdip.GdipFillPath(g, _bgBrush, bgPath);
         Gdip.GdipDeletePath(bgPath);
 
-        float colWidth = client.Width / (float)_enabledMetrics.Count;
+        float colWidth = ColumnPixelWidth;
         var s = _snapshot;
 
         for (int i = 0; i < _enabledMetrics.Count; i++)
@@ -438,27 +457,34 @@ internal static class PillWindow
         }
     }
 
+    // Compartidos entre CPU y GPU: un mismo pase de render consume cada
+    // buffer por completo antes del siguiente, así que reusarlos es seguro
+    // y evita un par de arrays nuevos en cada uno de los ~11 repintados
+    // por segundo que dura la animación de transición.
+    private static readonly PointF[] LinePointsBuffer = new PointF[HistoryLength];
+    private static readonly PointF[] LineFillPointsBuffer = new PointF[HistoryLength + 2];
+
     private static void DrawLineChart(nint g, RingBuffer history, float x, float y, float w, float h, Accent accent, double scale)
     {
         var values = history.Ordered();
         if (values.Length < 2) return;
 
-        var points = new PointF[values.Length];
         for (int i = 0; i < values.Length; i++)
         {
             float px = x + w * i / (values.Length - 1);
             float py = y + h - h * (float)(Math.Clamp(values[i], 0, scale) / scale);
-            points[i] = new PointF(px, py);
+            LinePointsBuffer[i] = new PointF(px, py);
         }
 
-        var fillPoints = new PointF[points.Length + 2];
-        Array.Copy(points, fillPoints, points.Length);
-        fillPoints[^2] = new PointF(x + w, y + h);
-        fillPoints[^1] = new PointF(x, y + h);
+        Array.Copy(LinePointsBuffer, LineFillPointsBuffer, values.Length);
+        LineFillPointsBuffer[values.Length] = new PointF(x + w, y + h);
+        LineFillPointsBuffer[values.Length + 1] = new PointF(x, y + h);
 
-        Gdip.GdipCreateSolidFill(accent.Fill, out nint fillBrush);
+        var gradTop = new PointF(x, y);
+        var gradBottom = new PointF(x, y + h);
+        Gdip.GdipCreateLineBrush(ref gradTop, ref gradBottom, accent.FillTop, accent.FillBottom, Gdip.WrapModeTile, out nint fillBrush);
         Gdip.GdipCreatePath(Gdip.FillModeAlternate, out nint path);
-        Gdip.GdipAddPathPolygon(path, fillPoints, fillPoints.Length);
+        Gdip.GdipAddPathPolygon(path, LineFillPointsBuffer, values.Length + 2);
         Gdip.GdipFillPath(g, fillBrush, path);
         Gdip.GdipDeletePath(path);
         Gdip.GdipDeleteBrush(fillBrush);
@@ -467,7 +493,7 @@ internal static class PillWindow
         Gdip.GdipSetPenLineJoin(pen, Gdip.LineJoinRound);
         Gdip.GdipSetPenStartCap(pen, Gdip.LineCapRound);
         Gdip.GdipSetPenEndCap(pen, Gdip.LineCapRound);
-        Gdip.GdipDrawLines(g, pen, points, points.Length);
+        Gdip.GdipDrawLines(g, pen, LinePointsBuffer, values.Length);
         Gdip.GdipDeletePen(pen);
     }
 

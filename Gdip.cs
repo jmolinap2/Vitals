@@ -44,6 +44,8 @@ internal static class Gdip
     public const int FontStyleBold = 1;
     public const int StringAlignNear = 0;
     public const int StringAlignCenter = 1;
+    public const int WrapModeTile = 0;
+    public const int MatrixOrderPrepend = 0;
 
     [DllImport("gdiplus.dll")]
     public static extern int GdiplusStartup(out nint token, ref GdiplusStartupInput input, nint output);
@@ -65,6 +67,12 @@ internal static class Gdip
 
     [DllImport("gdiplus.dll")]
     public static extern int GdipCreateSolidFill(uint argb, out nint brush);
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipCreateLineBrush(ref PointF point1, ref PointF point2, uint color1, uint color2, int wrapMode, out nint lineGradient);
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipScaleWorldTransform(nint graphics, float sx, float sy, int order);
 
     [DllImport("gdiplus.dll")]
     public static extern int GdipDeleteBrush(nint brush);
