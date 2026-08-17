@@ -13,10 +13,7 @@ internal static class NativeMethods
 
     public const int SW_SHOWNOACTIVATE = 4;
 
-    public const int LWA_ALPHA = 0x2;
-
     public const uint WM_DESTROY = 0x0002;
-    public const uint WM_PAINT = 0x000F;
     public const uint WM_TIMER = 0x0113;
     public const uint WM_RBUTTONUP = 0x0205;
     public const uint WM_NCHITTEST = 0x0084;
@@ -29,6 +26,7 @@ internal static class NativeMethods
     public const uint NIM_DELETE = 2;
     public const uint NIF_MESSAGE = 0x1;
     public const uint NIF_ICON = 0x2;
+    public const uint NIF_TIP = 0x4;
     public const uint MF_STRING = 0x0;
     public const uint TPM_RIGHTBUTTON = 0x0002;
     public const uint TrayIconId = 1;
@@ -38,25 +36,6 @@ internal static class NativeMethods
     public const nint HTCAPTION = 2;
 
     public const int SPI_GETWORKAREA = 0x0030;
-
-    public const uint SRCCOPY = 0x00CC0020;
-
-    public const uint DT_LEFT = 0x0000;
-    public const uint DT_CENTER = 0x0001;
-    public const uint DT_VCENTER = 0x0004;
-    public const uint DT_SINGLELINE = 0x0020;
-    public const uint DT_NOCLIP = 0x0100;
-
-    public const int TRANSPARENT_BK = 1;
-
-    public const int FW_NORMAL = 400;
-    public const int FW_SEMIBOLD = 600;
-    public const uint DEFAULT_CHARSET = 1;
-    public const uint OUT_DEFAULT_PRECIS = 0;
-    public const uint CLIP_DEFAULT_PRECIS = 0;
-    public const uint CLEARTYPE_QUALITY = 5;
-    public const uint DEFAULT_PITCH = 0;
-    public const uint FF_DONTCARE = 0;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT
@@ -97,16 +76,6 @@ internal static class NativeMethods
         public nint hIconSm;
     }
 
-    public unsafe struct PAINTSTRUCT
-    {
-        public nint hdc;
-        public int fErase;
-        public RECT rcPaint;
-        public int fRestore;
-        public int fIncUpdate;
-        public fixed byte rgbReserved[32];
-    }
-
     [StructLayout(LayoutKind.Sequential)]
     public struct FILETIME
     {
@@ -141,29 +110,6 @@ internal static class NativeMethods
         public uint BatteryFullLifeTime;
     }
 
-    // Real desktop blur-behind (Acrylic), applied via the undocumented but
-    // stable SetWindowCompositionAttribute — this is what gives a genuine
-    // frosted-glass backdrop instead of a flat translucent fill.
-    public const int WCA_ACCENT_POLICY = 19;
-    public const int ACCENT_ENABLE_ACRYLICBLURBEHIND = 4;
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct ACCENT_POLICY
-    {
-        public int AccentState;
-        public int AccentFlags;
-        public uint GradientColor; // 0xAABBGGRR
-        public int AnimationId;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct WINCOMPATTRDATA
-    {
-        public int Attribute;
-        public nint Data;
-        public int SizeOfData;
-    }
-
     // GPU% no existe como llamada Win32 directa; hay que leer el contador
     // de rendimiento "GPU Engine" (el mismo que usa el Administrador de tareas).
     public const uint PDH_FMT_DOUBLE = 0x00000200;
@@ -191,6 +137,10 @@ internal static class NativeMethods
 
     // ---- bandeja del sistema ----
 
+    // Debe reflejar NOTIFYICONDATAW COMPLETA: Windows valida cbSize contra los
+    // tamaños de versión conocidos (976 en x64) y rechaza la llamada si no
+    // coincide. Una struct recortada aquí hace que Shell_NotifyIcon falle en
+    // silencio y el ícono nunca aparezca en la bandeja.
     public unsafe struct NOTIFYICONDATA
     {
         public uint cbSize;
@@ -200,10 +150,21 @@ internal static class NativeMethods
         public uint uCallbackMessage;
         public nint hIcon;
         public fixed char szTip[128];
+        public uint dwState;
+        public uint dwStateMask;
+        public fixed char szInfo[256];
+        public uint uVersion;
+        public fixed char szInfoTitle[64];
+        public uint dwInfoFlags;
+        public Guid guidItem;
+        public nint hBalloonIcon;
     }
 
-    [DllImport("shell32.dll")]
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "Shell_NotifyIconW")]
     public static extern bool Shell_NotifyIcon(uint dwMessage, ref NOTIFYICONDATA lpData);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "ExtractIconExW")]
+    public static extern uint ExtractIconEx(string lpszFile, int nIconIndex, out nint phiconLarge, out nint phiconSmall, uint nIcons);
 
     [DllImport("user32.dll")]
     public static extern nint LoadIcon(nint hInstance, nint lpIconName);
@@ -261,51 +222,68 @@ internal static class NativeMethods
     public static extern bool ShowWindow(nint hWnd, int nCmdShow);
 
     [DllImport("user32.dll")]
-    public static extern int SetWindowRgn(nint hWnd, nint hRgn, bool bRedraw);
-
-    [DllImport("user32.dll")]
-    public static extern bool SetLayeredWindowAttributes(nint hwnd, uint crKey, byte bAlpha, uint dwFlags);
-
-    [DllImport("user32.dll")]
-    public static extern nint BeginPaint(nint hWnd, out PAINTSTRUCT lpPaint);
-
-    [DllImport("user32.dll")]
-    public static extern bool EndPaint(nint hWnd, ref PAINTSTRUCT lpPaint);
-
-    [DllImport("user32.dll")]
-    public static extern bool GetClientRect(nint hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll")]
-    public static extern bool InvalidateRect(nint hWnd, nint lpRect, bool bErase);
-
-    [DllImport("user32.dll")]
     public static extern nint LoadCursor(nint hInstance, nint lpCursorName);
+
+    // --- alfa por píxel (UpdateLayeredWindow) ---
+    // Reemplaza a SetWindowRgn: la región recorta con bordes duros, por eso
+    // las esquinas redondeadas se veían dentadas. Con una superficie ARGB el
+    // borde queda suavizado de verdad y la opacidad es controlable.
+
+    public const int BI_RGB = 0;
+    public const uint DIB_RGB_COLORS = 0;
+    public const uint ULW_ALPHA = 0x00000002;
+    public const byte AC_SRC_OVER = 0x00;
+    public const byte AC_SRC_ALPHA = 0x01;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SIZE { public int cx, cy; }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    public struct BLENDFUNCTION
+    {
+        public byte BlendOp;
+        public byte BlendFlags;
+        public byte SourceConstantAlpha;
+        public byte AlphaFormat;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFOHEADER
+    {
+        public uint biSize;
+        public int biWidth;
+        public int biHeight;
+        public ushort biPlanes;
+        public ushort biBitCount;
+        public uint biCompression;
+        public uint biSizeImage;
+        public int biXPelsPerMeter;
+        public int biYPelsPerMeter;
+        public uint biClrUsed;
+        public uint biClrImportant;
+    }
+
+    [DllImport("gdi32.dll")]
+    public static extern nint CreateDIBSection(nint hdc, ref BITMAPINFOHEADER pbmi, uint usage,
+        out nint ppvBits, nint hSection, uint offset);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool UpdateLayeredWindow(nint hWnd, nint hdcDst, nint pptDst, ref SIZE psize,
+        nint hdcSrc, ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint dwFlags);
+
+    [DllImport("user32.dll")]
+    public static extern nint GetDC(nint hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(nint hWnd, nint hDC);
 
     [DllImport("user32.dll")]
     public static extern bool SystemParametersInfo(int uiAction, int uiParam, ref RECT pvParam, int fWinIni);
 
-    [DllImport("user32.dll")]
-    public static extern int FillRect(nint hDC, ref RECT lprc, nint hbr);
-
-    [DllImport("user32.dll")]
-    public static extern int FrameRect(nint hDC, ref RECT lprc, nint hbr);
-
-    [DllImport("user32.dll")]
-    public static extern int SetWindowCompositionAttribute(nint hwnd, ref WINCOMPATTRDATA data);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern int DrawText(nint hDC, string lpchText, int nCount, ref RECT lpRect, uint uFormat);
-
     // ---- gdi32.dll ----
 
     [DllImport("gdi32.dll")]
-    public static extern nint CreateRoundRectRgn(int x1, int y1, int x2, int y2, int cx, int cy);
-
-    [DllImport("gdi32.dll")]
     public static extern nint CreateCompatibleDC(nint hdc);
-
-    [DllImport("gdi32.dll")]
-    public static extern nint CreateCompatibleBitmap(nint hdc, int cx, int cy);
 
     [DllImport("gdi32.dll")]
     public static extern nint SelectObject(nint hdc, nint h);
@@ -315,22 +293,6 @@ internal static class NativeMethods
 
     [DllImport("gdi32.dll")]
     public static extern bool DeleteObject(nint ho);
-
-    [DllImport("gdi32.dll")]
-    public static extern nint CreateSolidBrush(uint crColor);
-
-    [DllImport("gdi32.dll")]
-    public static extern uint SetTextColor(nint hdc, uint crColor);
-
-    [DllImport("gdi32.dll")]
-    public static extern int SetBkMode(nint hdc, int mode);
-
-    [DllImport("gdi32.dll")]
-    public static extern bool BitBlt(nint hdcDest, int xDest, int yDest, int w, int h, nint hdcSrc, int xSrc, int ySrc, uint rop);
-
-    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
-    public static extern nint CreateFont(int h, int w, int esc, int orient, int weight, uint italic, uint underline,
-        uint strikeout, uint charset, uint outPrec, uint clipPrec, uint quality, uint pitchAndFamily, string face);
 
     // ---- kernel32.dll ----
 

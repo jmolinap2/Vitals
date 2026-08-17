@@ -48,6 +48,7 @@ internal static class PillWindow
 {
     private const string ClassName = "VitalsPillWindow";
     private const int ColumnPixelWidth = 96;
+    private const int EdgePadding = 10;
     private const int PillHeight = 104;
     private const int ScreenMargin = 12;
     private const int CornerRadius = 24;
@@ -56,6 +57,8 @@ internal static class PillWindow
     private static List<MetricEntry> _enabledMetrics = [];
     private static int _pillWidth; // ancho lógico (sin escalar) — GDI+ escala todo con una sola transformación
     private static double _scale = 1.0;
+    private static byte _opacity = 242;
+    private static nint _hwnd;
 
     private const nint DataTimerId = 1;
     private const nint AnimTimerId = 2;
@@ -74,6 +77,7 @@ internal static class PillWindow
     private static readonly RingBuffer RamHistory = new(HistoryLength);
     private static readonly RingBuffer NetUpHistory = new(HistoryLength);
     private static readonly RingBuffer NetDownHistory = new(HistoryLength);
+    private static readonly RingBuffer BatteryHistory = new(HistoryLength);
 
     // Colores fijos por métrica, como en la referencia — nada de recoloreo
     // por umbral: la propia gráfica ya comunica cuándo algo está cargado.
@@ -93,10 +97,53 @@ internal static class PillWindow
     private static NOTIFYICONDATA _trayIcon;
     private static nint _bgBrush;
     private static nint _labelBrush;
+    private static nint _dividerBrush;
+    private static nint _borderPen;
     private static nint _labelFont;
     private static nint _valueFont;
     private static nint _centerFormat;
     private static nint _leftFormat;
+
+    // Superficie ARGB persistente. Se dibuja aquí y se entrega entera a
+    // UpdateLayeredWindow, que respeta el alfa de cada píxel.
+    private static nint _backDc;
+    private static nint _backBmp;
+    private static nint _backBits;
+    private static nint _gdipBitmap;
+    private static nint _graphics;
+    private static int _backWidth;
+    private static int _backHeight;
+
+    private enum ChartKind { Line, Bars }
+
+    /// <summary>
+    /// Todo lo que no cambia entre cuadros — posiciones, ancho de etiqueta ya
+    /// medido, y los objetos GDI+ — se calcula una sola vez al iniciar. El
+    /// bucle de render solo dibuja.
+    /// </summary>
+    private sealed class ColumnLayout
+    {
+        public required MetricKey Key;
+        public required IconKind Icon;
+        public required string Label;
+        public required Accent Accent;
+        public required RingBuffer History;
+        public required ChartKind Chart;
+        public required bool DynamicScale;
+
+        public float IconX;
+        public RectF LabelRect;
+        public RectF ValueRect;
+        public RectF ChartRect;
+        public float DividerX;
+
+        public nint Pen;
+        public nint AccentBrush;
+        public nint TextBrush;
+        public nint GradientBrush;
+    }
+
+    private static ColumnLayout[] _columns = [];
 
     public static unsafe void Run()
     {
@@ -105,8 +152,9 @@ internal static class PillWindow
         var config = VitalsConfig.Load();
         _enabledMetrics = config.Metrics.Where(m => m.Enabled).ToList();
         if (_enabledMetrics.Count == 0) _enabledMetrics = VitalsConfig.DefaultOrder();
-        _pillWidth = _enabledMetrics.Count * ColumnPixelWidth;
-        _scale = Math.Clamp(config.Scale, 0.75, 1.6);
+        _pillWidth = EdgePadding * 2 + _enabledMetrics.Count * ColumnPixelWidth;
+        _scale = Math.Clamp(config.Scale, 0.6, 2.0);
+        _opacity = (byte)Math.Round(Math.Clamp(config.Opacity, 0.25, 1.0) * 255);
 
         nint hInstance = GetModuleHandle(null);
         var wndProcPtr = (nint)(delegate* unmanaged<nint, uint, nint, nint, nint>)&WndProc;
@@ -139,13 +187,15 @@ internal static class PillWindow
             0, 0, hInstance, 0);
 
         if (hwnd == 0) return;
+        _hwnd = hwnd;
 
-        SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, deviceWidth, deviceHeight, deviceCorner * 2, deviceCorner * 2), true);
-        SetLayeredWindowAttributes(hwnd, 0, 250, LWA_ALPHA);
-
-        _bgBrush = 0;
-        Gdip.GdipCreateSolidFill(Gdip.Argb(255, 16, 18, 26), out _bgBrush);
+        // Sin SetWindowRgn ni SetLayeredWindowAttributes: la forma y la
+        // opacidad las define ahora el alfa de la propia superficie.
+        Gdip.GdipCreateSolidFill(Gdip.Argb(255, 0, 0, 0), out _bgBrush);
         Gdip.GdipCreateSolidFill(Gdip.Argb(255, 150, 160, 168), out _labelBrush);
+        Gdip.GdipCreateSolidFill(Gdip.Argb(30, 255, 255, 255), out _dividerBrush);
+        // Borde: define el contorno de la píldora ahora que no hay región.
+        Gdip.GdipCreatePen1(Gdip.Argb(60, 255, 255, 255), 1f, Gdip.UnitPixel, out _borderPen);
 
         Gdip.GdipCreateFontFamilyFromName("Segoe UI", 0, out nint labelFamily);
         Gdip.GdipCreateFont(labelFamily, 12.5f, Gdip.FontStyleRegular, Gdip.UnitPixel, out _labelFont);
@@ -160,9 +210,12 @@ internal static class PillWindow
         Gdip.GdipSetStringFormatAlign(_leftFormat, Gdip.StringAlignNear);
         Gdip.GdipSetStringFormatLineAlign(_leftFormat, Gdip.StringAlignCenter);
 
+        BuildColumnLayout();
+        CreateBackBuffer(deviceWidth, deviceHeight);
         AddTrayIcon(hwnd);
 
         _snapshot = _animFrom = _animTo = Sampler.Sample();
+        Redraw();
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetTimer(hwnd, DataTimerId, 1000, 0);
 
@@ -175,17 +228,132 @@ internal static class PillWindow
         Shell_NotifyIcon(NIM_DELETE, ref _trayIcon);
     }
 
+    private static void BuildColumnLayout()
+    {
+        // Un HDC de pantalla basta para medir texto; se libera enseguida.
+        nint screenDc = GetDC(0);
+        Gdip.GdipCreateFromHDC(screenDc, out nint measureG);
+
+        const float iconSize = 15, gap = 6, rowIconY = 13, chartPad = 10;
+
+        _columns = new ColumnLayout[_enabledMetrics.Count];
+        for (int i = 0; i < _enabledMetrics.Count; i++)
+        {
+            var key = _enabledMetrics[i].Key;
+            var col = DescribeMetric(key);
+            float colStart = EdgePadding + i * ColumnPixelWidth;
+
+            var probe = new RectF(0, 0, 400, 24);
+            Gdip.GdipMeasureString(measureG, col.Label, col.Label.Length, _labelFont,
+                ref probe, _leftFormat, out var bbox, out _, out _);
+
+            float comboWidth = iconSize + gap + bbox.Width;
+            col.IconX = colStart + (ColumnPixelWidth - comboWidth) / 2f;
+            col.LabelRect = new RectF(col.IconX + iconSize + gap, rowIconY - 4, bbox.Width + 4, 22);
+            col.ChartRect = new RectF(colStart + chartPad, 36, ColumnPixelWidth - chartPad * 2, 38);
+            col.ValueRect = new RectF(colStart, 78, ColumnPixelWidth, 22);
+            col.DividerX = colStart;
+
+            Gdip.GdipCreatePen1(col.Accent.Stroke, 1.6f, Gdip.UnitPixel, out col.Pen);
+            Gdip.GdipSetPenLineJoin(col.Pen, Gdip.LineJoinRound);
+            Gdip.GdipSetPenStartCap(col.Pen, Gdip.LineCapRound);
+            Gdip.GdipSetPenEndCap(col.Pen, Gdip.LineCapRound);
+            Gdip.GdipCreateSolidFill(col.Accent.Stroke, out col.AccentBrush);
+            Gdip.GdipCreateSolidFill(col.Accent.Text, out col.TextBrush);
+
+            var gradTop = new PointF(col.ChartRect.X, col.ChartRect.Y);
+            var gradBottom = new PointF(col.ChartRect.X, col.ChartRect.Y + col.ChartRect.Height);
+            Gdip.GdipCreateLineBrush(ref gradTop, ref gradBottom,
+                col.Accent.FillTop, col.Accent.FillBottom, Gdip.WrapModeTile, out col.GradientBrush);
+
+            _columns[i] = col;
+        }
+
+        Gdip.GdipDeleteGraphics(measureG);
+        ReleaseDC(0, screenDc);
+    }
+
+    private static ColumnLayout DescribeMetric(MetricKey key) => key switch
+    {
+        MetricKey.Cpu => new ColumnLayout
+        {
+            Key = key, Icon = IconKind.Cpu, Label = "CPU", Accent = CpuAccent,
+            History = CpuHistory, Chart = ChartKind.Line, DynamicScale = false,
+        },
+        MetricKey.Gpu => new ColumnLayout
+        {
+            Key = key, Icon = IconKind.Gpu, Label = "GPU", Accent = GpuAccent,
+            History = GpuHistory, Chart = ChartKind.Line, DynamicScale = false,
+        },
+        MetricKey.Ram => new ColumnLayout
+        {
+            Key = key, Icon = IconKind.Ram, Label = "RAM", Accent = RamAccent,
+            History = RamHistory, Chart = ChartKind.Bars, DynamicScale = false,
+        },
+        MetricKey.Up => new ColumnLayout
+        {
+            Key = key, Icon = IconKind.Up, Label = "Subida", Accent = UpAccent,
+            History = NetUpHistory, Chart = ChartKind.Bars, DynamicScale = true,
+        },
+        MetricKey.Down => new ColumnLayout
+        {
+            Key = key, Icon = IconKind.Down, Label = "Bajada", Accent = DownAccent,
+            History = NetDownHistory, Chart = ChartKind.Bars, DynamicScale = true,
+        },
+        _ => new ColumnLayout
+        {
+            Key = MetricKey.Battery, Icon = IconKind.Battery, Label = "Batería", Accent = BatteryAccent,
+            History = BatteryHistory, Chart = ChartKind.Line, DynamicScale = false,
+        },
+    };
+
+    private static void CreateBackBuffer(int width, int height)
+    {
+        nint screenDc = GetDC(0);
+        _backDc = CreateCompatibleDC(screenDc);
+
+        var header = new BITMAPINFOHEADER
+        {
+            biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
+            biWidth = width,
+            biHeight = -height, // negativo = filas de arriba hacia abajo
+            biPlanes = 1,
+            biBitCount = 32,
+            biCompression = BI_RGB,
+        };
+        _backBmp = CreateDIBSection(screenDc, ref header, DIB_RGB_COLORS, out _backBits, 0, 0);
+        SelectObject(_backDc, _backBmp);
+        ReleaseDC(0, screenDc);
+
+        // GDI+ dibuja directamente sobre los píxeles del DIB, en premultiplicado.
+        Gdip.GdipCreateBitmapFromScan0(width, height, width * 4, Gdip.PixelFormat32bppPARGB, _backBits, out _gdipBitmap);
+        Gdip.GdipGetImageGraphicsContext(_gdipBitmap, out _graphics);
+        Gdip.GdipSetSmoothingMode(_graphics, Gdip.SmoothingModeAntiAlias);
+        Gdip.GdipSetTextRenderingHint(_graphics, Gdip.TextRenderingHintAntiAlias);
+        Gdip.GdipScaleWorldTransform(_graphics, (float)_scale, (float)_scale, Gdip.MatrixOrderPrepend);
+
+        _backWidth = width;
+        _backHeight = height;
+    }
+
     private static unsafe void AddTrayIcon(nint hwnd)
     {
+        ExtractIconEx(Environment.ProcessPath!, 0, out _, out nint smallIcon, 1);
+
         _trayIcon = new NOTIFYICONDATA
         {
             cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATA>(),
             hWnd = hwnd,
             uID = TrayIconId,
-            uFlags = NIF_MESSAGE | NIF_ICON,
+            uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage = WM_TRAYICON,
-            hIcon = LoadIcon(0, (nint)32512), // IDI_APPLICATION — ícono propio queda como pulido posterior
+            hIcon = smallIcon,
         };
+
+        const string tip = "Vitals";
+        for (int i = 0; i < tip.Length; i++)
+            _trayIcon.szTip[i] = tip[i];
+
         Shell_NotifyIcon(NIM_ADD, ref _trayIcon);
     }
 
@@ -222,6 +390,7 @@ internal static class PillWindow
                 RamHistory.Push(_animTo.RamPercent);
                 NetUpHistory.Push(_animTo.NetUpBytesPerSec);
                 NetDownHistory.Push(_animTo.NetDownBytesPerSec);
+                BatteryHistory.Push(Math.Max(_animTo.BatteryPercent, 0));
 
                 if (!_animRunning)
                 {
@@ -242,17 +411,20 @@ internal static class PillWindow
                 {
                     _snapshot = Lerp(_animFrom, _animTo, EaseOutCubic(t));
                 }
-                InvalidateRect(hWnd, 0, false);
-                return 0;
-
-            case WM_PAINT:
-                Paint(hWnd);
+                Redraw();
                 return 0;
 
             case WM_NCHITTEST:
                 return HTCAPTION;
 
             case WM_TRAYICON when lParam == (nint)WM_RBUTTONUP || lParam == (nint)WM_LBUTTONUP:
+                ShowTrayMenu(hWnd);
+                return 0;
+
+            // Con NCHITTEST forzado a HTCAPTION el clic derecho sobre la
+            // píldora llega como WM_NCRBUTTONUP: mismo menú, sin depender
+            // de encontrar el ícono en la bandeja.
+            case WM_NCRBUTTONUP:
                 ShowTrayMenu(hWnd);
                 return 0;
 
@@ -273,125 +445,70 @@ internal static class PillWindow
         }
     }
 
-    private static void Paint(nint hWnd)
+    private static void Redraw()
     {
-        nint hdc = BeginPaint(hWnd, out var ps);
-        GetClientRect(hWnd, out var client);
+        nint g = _graphics;
 
-        nint memDc = CreateCompatibleDC(hdc);
-        nint memBmp = CreateCompatibleBitmap(hdc, client.Width, client.Height);
-        nint oldBmp = SelectObject(memDc, memBmp);
+        // Limpiar a totalmente transparente: fuera de la píldora no debe
+        // quedar nada, y así el borde redondeado se compone con suavizado.
+        Gdip.GdipGraphicsClear(g, 0x00000000);
 
-        Render(memDc);
-
-        BitBlt(hdc, 0, 0, client.Width, client.Height, memDc, 0, 0, SRCCOPY);
-
-        SelectObject(memDc, oldBmp);
-        DeleteObject(memBmp);
-        DeleteDC(memDc);
-        EndPaint(hWnd, ref ps);
-    }
-
-    private static void Render(nint memDc)
-    {
-        Gdip.GdipCreateFromHDC(memDc, out nint g);
-        Gdip.GdipSetSmoothingMode(g, Gdip.SmoothingModeAntiAlias);
-        Gdip.GdipSetTextRenderingHint(g, Gdip.TextRenderingHintAntiAliasGridFit);
-        Gdip.GdipScaleWorldTransform(g, (float)_scale, (float)_scale, Gdip.MatrixOrderPrepend);
-
-        // Todo lo que sigue dibuja en coordenadas lógicas (sin escalar) — la
-        // transformación de arriba ya mapea eso al tamaño real de ventana.
-        nint bgPath = Gdip.RoundRectPath(0, 0, _pillWidth, PillHeight, CornerRadius);
+        // Coordenadas lógicas (sin escalar): la transformación del contexto
+        // ya las mapea al tamaño real de ventana.
+        nint bgPath = Gdip.RoundRectPath(0.5f, 0.5f, _pillWidth - 1, PillHeight - 1, CornerRadius);
         Gdip.GdipFillPath(g, _bgBrush, bgPath);
+        Gdip.GdipDrawPath(g, _borderPen, bgPath);
         Gdip.GdipDeletePath(bgPath);
 
-        float colWidth = ColumnPixelWidth;
         var s = _snapshot;
-
-        for (int i = 0; i < _enabledMetrics.Count; i++)
-            DrawMetricColumn(g, i, colWidth, _enabledMetrics[i].Key, s);
-
-        Gdip.GdipDeleteGraphics(g);
-    }
-
-    private static void DrawMetricColumn(nint g, int index, float colWidth, MetricKey key, Snapshot s)
-    {
-        switch (key)
+        for (int i = 0; i < _columns.Length; i++)
         {
-            case MetricKey.Cpu:
-                DrawColumn(g, index, colWidth, IconKind.Cpu, "CPU", CpuAccent,
-                    (gr, x, y, w, h) => DrawLineChart(gr, CpuHistory, x, y, w, h, CpuAccent, 100),
-                    $"{s.CpuPercent:0}%");
-                break;
-
-            case MetricKey.Gpu:
-                DrawColumn(g, index, colWidth, IconKind.Gpu, "GPU", GpuAccent,
-                    (gr, x, y, w, h) => DrawLineChart(gr, GpuHistory, x, y, w, h, GpuAccent, 100),
-                    s.GpuPercent is { } gpu ? $"{gpu:0}%" : "—");
-                break;
-
-            case MetricKey.Ram:
-                DrawColumn(g, index, colWidth, IconKind.Ram, "RAM", RamAccent,
-                    (gr, x, y, w, h) => DrawBarChart(gr, RamHistory, x, y, w, h, RamAccent, 100),
-                    $"{s.RamPercent}%");
-                break;
-
-            case MetricKey.Up:
-                DrawColumn(g, index, colWidth, IconKind.Up, "Subida", UpAccent,
-                    (gr, x, y, w, h) => DrawBarChart(gr, NetUpHistory, x, y, w, h, UpAccent, Math.Max(NetUpHistory.Max(), 20_000)),
-                    MetricsSampler.FormatBps(s.NetUpBytesPerSec));
-                break;
-
-            case MetricKey.Down:
-                DrawColumn(g, index, colWidth, IconKind.Down, "Bajada", DownAccent,
-                    (gr, x, y, w, h) => DrawBarChart(gr, NetDownHistory, x, y, w, h, DownAccent, Math.Max(NetDownHistory.Max(), 20_000)),
-                    MetricsSampler.FormatBps(s.NetDownBytesPerSec));
-                break;
-
-            case MetricKey.Battery:
-                DrawColumn(g, index, colWidth, IconKind.Battery, "Batería", BatteryAccent, null,
-                    s.BatteryPercent < 0 ? "—" : $"{s.BatteryPercent}%{(s.OnAc ? " ⚡" : "")}");
-                break;
-        }
-    }
-
-    private static void DrawColumn(nint g, int index, float colWidth, IconKind icon, string label, Accent accent,
-        Action<nint, float, float, float, float>? chart, string value)
-    {
-        float colStart = index * colWidth;
-        const float iconSize = 15, gap = 6, rowIconY = 13;
-
-        var measureRect = new RectF(0, 0, 400, 24);
-        Gdip.GdipMeasureString(g, label, label.Length, _labelFont, ref measureRect, _leftFormat, out var bbox, out _, out _);
-
-        float comboWidth = iconSize + gap + bbox.Width;
-        float startX = colStart + (colWidth - comboWidth) / 2f;
-
-        Gdip.GdipCreatePen1(accent.Stroke, 1.6f, Gdip.UnitPixel, out nint pen);
-        Gdip.GdipSetPenLineJoin(pen, Gdip.LineJoinRound);
-        Gdip.GdipSetPenStartCap(pen, Gdip.LineCapRound);
-        Gdip.GdipSetPenEndCap(pen, Gdip.LineCapRound);
-        Gdip.GdipCreateSolidFill(accent.Stroke, out nint fillBrush);
-
-        DrawIcon(g, icon, startX, rowIconY, iconSize, pen, fillBrush);
-
-        var labelRect = new RectF(startX + iconSize + gap, rowIconY - 4, bbox.Width + 4, 22);
-        Gdip.GdipDrawString(g, label, label.Length, _labelFont, ref labelRect, _leftFormat, _labelBrush);
-
-        Gdip.GdipDeletePen(pen);
-        Gdip.GdipDeleteBrush(fillBrush);
-
-        if (chart is not null)
-        {
-            const float chartTop = 36, chartHeight = 38, chartPad = 10;
-            chart(g, colStart + chartPad, chartTop, colWidth - chartPad * 2, chartHeight);
+            var col = _columns[i];
+            if (i > 0) Gdip.GdipFillRectangle(g, _dividerBrush, col.DividerX, 18, 1, PillHeight - 36);
+            DrawColumn(g, col, s);
         }
 
-        Gdip.GdipCreateSolidFill(accent.Text, out nint valueBrush);
-        var valueRect = new RectF(colStart, 78, colWidth, 22);
-        Gdip.GdipDrawString(g, value, value.Length, _valueFont, ref valueRect, _centerFormat, valueBrush);
-        Gdip.GdipDeleteBrush(valueBrush);
+        var size = new SIZE { cx = _backWidth, cy = _backHeight };
+        var srcPoint = new POINT { X = 0, Y = 0 };
+        var blend = new BLENDFUNCTION
+        {
+            BlendOp = AC_SRC_OVER,
+            BlendFlags = 0,
+            SourceConstantAlpha = _opacity,
+            AlphaFormat = AC_SRC_ALPHA,
+        };
+        UpdateLayeredWindow(_hwnd, 0, 0, ref size, _backDc, ref srcPoint, 0, ref blend, ULW_ALPHA);
     }
+
+    private static void DrawColumn(nint g, ColumnLayout col, Snapshot s)
+    {
+        const float iconSize = 15, rowIconY = 13;
+
+        DrawIcon(g, col.Icon, col.IconX, rowIconY, iconSize, col.Pen, col.AccentBrush);
+
+        var labelRect = col.LabelRect;
+        Gdip.GdipDrawString(g, col.Label, col.Label.Length, _labelFont, ref labelRect, _leftFormat, _labelBrush);
+
+        double scale = col.DynamicScale ? Math.Max(col.History.Max(), 20_000) : 100;
+        if (col.Chart == ChartKind.Line)
+            DrawLineChart(g, col, scale);
+        else
+            DrawBarChart(g, col, scale);
+
+        string value = FormatValue(col.Key, s);
+        var valueRect = col.ValueRect;
+        Gdip.GdipDrawString(g, value, value.Length, _valueFont, ref valueRect, _centerFormat, col.TextBrush);
+    }
+
+    private static string FormatValue(MetricKey key, Snapshot s) => key switch
+    {
+        MetricKey.Cpu => $"{s.CpuPercent:0}%",
+        MetricKey.Gpu => s.GpuPercent is { } gpu ? $"{gpu:0}%" : "—",
+        MetricKey.Ram => $"{s.RamPercent}%",
+        MetricKey.Up => MetricsSampler.FormatBps(s.NetUpBytesPerSec),
+        MetricKey.Down => MetricsSampler.FormatBps(s.NetDownBytesPerSec),
+        _ => s.BatteryPercent < 0 ? "—" : $"{s.BatteryPercent}%{(s.OnAc ? " ⚡" : "")}",
+    };
 
     private static void DrawIcon(nint g, IconKind kind, float x, float y, float size, nint pen, nint fillBrush)
     {
@@ -464,10 +581,13 @@ internal static class PillWindow
     private static readonly PointF[] LinePointsBuffer = new PointF[HistoryLength];
     private static readonly PointF[] LineFillPointsBuffer = new PointF[HistoryLength + 2];
 
-    private static void DrawLineChart(nint g, RingBuffer history, float x, float y, float w, float h, Accent accent, double scale)
+    private static void DrawLineChart(nint g, ColumnLayout col, double scale)
     {
-        var values = history.Ordered();
+        var values = col.History.Ordered();
         if (values.Length < 2) return;
+
+        float x = col.ChartRect.X, y = col.ChartRect.Y;
+        float w = col.ChartRect.Width, h = col.ChartRect.Height;
 
         for (int i = 0; i < values.Length; i++)
         {
@@ -480,42 +600,32 @@ internal static class PillWindow
         LineFillPointsBuffer[values.Length] = new PointF(x + w, y + h);
         LineFillPointsBuffer[values.Length + 1] = new PointF(x, y + h);
 
-        var gradTop = new PointF(x, y);
-        var gradBottom = new PointF(x, y + h);
-        Gdip.GdipCreateLineBrush(ref gradTop, ref gradBottom, accent.FillTop, accent.FillBottom, Gdip.WrapModeTile, out nint fillBrush);
         Gdip.GdipCreatePath(Gdip.FillModeAlternate, out nint path);
         Gdip.GdipAddPathPolygon(path, LineFillPointsBuffer, values.Length + 2);
-        Gdip.GdipFillPath(g, fillBrush, path);
+        Gdip.GdipFillPath(g, col.GradientBrush, path);
         Gdip.GdipDeletePath(path);
-        Gdip.GdipDeleteBrush(fillBrush);
 
-        Gdip.GdipCreatePen1(accent.Stroke, 1.8f, Gdip.UnitPixel, out nint pen);
-        Gdip.GdipSetPenLineJoin(pen, Gdip.LineJoinRound);
-        Gdip.GdipSetPenStartCap(pen, Gdip.LineCapRound);
-        Gdip.GdipSetPenEndCap(pen, Gdip.LineCapRound);
-        Gdip.GdipDrawLines(g, pen, LinePointsBuffer, values.Length);
-        Gdip.GdipDeletePen(pen);
+        Gdip.GdipDrawLines(g, col.Pen, LinePointsBuffer, values.Length);
     }
 
-    private static void DrawBarChart(nint g, RingBuffer history, float x, float y, float w, float h, Accent accent, double scale)
+    private static void DrawBarChart(nint g, ColumnLayout col, double scale)
     {
-        var values = history.Ordered();
+        var values = col.History.Ordered();
         if (values.Length == 0) return;
+
+        float x = col.ChartRect.X, y = col.ChartRect.Y;
+        float w = col.ChartRect.Width, h = col.ChartRect.Height;
 
         const float gap = 2f;
         float barW = (w - gap * (values.Length - 1)) / values.Length;
         if (barW < 1) barW = 1;
 
-        Gdip.GdipCreateSolidFill(accent.Stroke, out nint brush);
         for (int i = 0; i < values.Length; i++)
         {
             double norm = Math.Clamp(values[i] / scale, 0, 1);
             float barH = Math.Max((float)(h * norm), 1.5f);
-            float bx = x + i * (barW + gap);
-            float by = y + h - barH;
-            Gdip.GdipFillRectangle(g, brush, bx, by, barW, barH);
+            Gdip.GdipFillRectangle(g, col.AccentBrush, x + i * (barW + gap), y + h - barH, barW, barH);
         }
-        Gdip.GdipDeleteBrush(brush);
     }
 
     private static Snapshot Lerp(Snapshot a, Snapshot b, double t) => new()

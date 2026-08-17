@@ -36,6 +36,9 @@ internal static class Gdip
 {
     public const int SmoothingModeAntiAlias = 4;
     public const int TextRenderingHintAntiAliasGridFit = 3;
+    // Sobre una superficie con alfa hay que usar el suavizado sin ClearType:
+    // ClearType asume un fondo opaco conocido y ensucia los bordes.
+    public const int TextRenderingHintAntiAlias = 4;
     public const int UnitPixel = 2;
     public const int LineCapRound = 2;
     public const int LineJoinRound = 2;
@@ -50,8 +53,20 @@ internal static class Gdip
     [DllImport("gdiplus.dll")]
     public static extern int GdiplusStartup(out nint token, ref GdiplusStartupInput input, nint output);
 
+    // Formato premultiplicado: es el que exige UpdateLayeredWindow.
+    public const int PixelFormat32bppPARGB = 0x000E200B;
+
     [DllImport("gdiplus.dll")]
     public static extern int GdipCreateFromHDC(nint hdc, out nint graphics);
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipCreateBitmapFromScan0(int width, int height, int stride, int format, nint scan0, out nint bitmap);
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipGetImageGraphicsContext(nint image, out nint graphics);
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipDisposeImage(nint image);
 
     [DllImport("gdiplus.dll")]
     public static extern int GdipDeleteGraphics(nint graphics);

@@ -8,7 +8,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>VitalsSettings</AssemblyName>
     <RootNamespace>Vitals.Settings</RootNamespace>
+    <ApplicationIcon>..\vitals.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="..\vitals.ico" Link="vitals.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Vitals.Shared\Vitals.Shared.csproj" />
