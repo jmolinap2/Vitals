@@ -17,6 +17,18 @@ public sealed class VitalsConfig
     public double Scale { get; set; } = 1.0;
     public double Opacity { get; set; } = 0.95;
 
+    /// <summary>Interpola los valores entre lecturas (~11 repintados/s en vez de 1).</summary>
+    public bool SmoothTransitions { get; set; } = true;
+
+    /// <summary>Dibuja el historial de cada métrica. Al desactivarlo la píldora se vuelve compacta.</summary>
+    public bool ShowCharts { get; set; } = true;
+
+    /// <summary>Ancho en píxeles de cada columna: controla lo compacta que queda la píldora.</summary>
+    public int ColumnWidth { get; set; } = 96;
+
+    /// <summary>Pinta el valor en ámbar/rojo al superar los umbrales de alerta.</summary>
+    public bool AlertColors { get; set; } = true;
+
     public static List<MetricEntry> DefaultOrder() =>
     [
         new() { Key = MetricKey.Cpu },

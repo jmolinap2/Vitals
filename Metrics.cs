@@ -1,4 +1,3 @@
-using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Linq;
 
@@ -22,26 +21,36 @@ internal sealed class MetricsSampler
     private NativeMethods.FILETIME _prevUser;
     private bool _hasPrevCpu;
 
-    private long _prevBytesIn;
-    private long _prevBytesOut;
-    private DateTime _prevNetSample = DateTime.MinValue;
-
-    private nint _gpuQuery;
+    private nint _query;
     private nint _gpuCounter;
+    private nint _netSentCounter;
+    private nint _netRecvCounter;
     private bool _gpuAvailable;
+    private bool _netAvailable;
 
-    public MetricsSampler() => InitGpu();
+    public MetricsSampler() => InitCounters();
 
     public Snapshot Sample()
     {
-        var (up, down) = SampleNetwork();
+        // Una sola recolección alimenta a todos los contadores PDH.
+        if ((_gpuAvailable || _netAvailable) && NativeMethods.PdhCollectQueryData(_query) != 0)
+        {
+            _gpuAvailable = false;
+            _netAvailable = false;
+        }
+
+        double up = _netAvailable ? SumCounter(_netSentCounter) : 0;
+        double down = _netAvailable ? SumCounter(_netRecvCounter) : 0;
+        double? gpu = SampleGpu();
         int battery = SampleBattery(out bool onAc);
+        double cpu = SampleCpu();
+        uint ram = SampleRam();
 
         return new Snapshot
         {
-            CpuPercent = SampleCpu(),
-            GpuPercent = SampleGpu(),
-            RamPercent = SampleRam(),
+            CpuPercent = cpu,
+            GpuPercent = gpu,
+            RamPercent = ram,
             BatteryPercent = battery,
             OnAc = onAc,
             NetUpBytesPerSec = up,
@@ -90,37 +99,6 @@ internal sealed class MetricsSampler
         return status.BatteryLifePercent <= 100 ? status.BatteryLifePercent : -1;
     }
 
-    private (double up, double down) SampleNetwork()
-    {
-        long bytesIn = 0, bytesOut = 0;
-        foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
-        {
-            if (ni.OperationalStatus != OperationalStatus.Up) continue;
-            if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-
-            var stats = ni.GetIPStatistics();
-            bytesIn += stats.BytesReceived;
-            bytesOut += stats.BytesSent;
-        }
-
-        double up = 0, down = 0;
-        var now = DateTime.UtcNow;
-        if (_prevNetSample != DateTime.MinValue)
-        {
-            double seconds = (now - _prevNetSample).TotalSeconds;
-            if (seconds > 0)
-            {
-                up = Math.Max(0, (bytesOut - _prevBytesOut) / seconds);
-                down = Math.Max(0, (bytesIn - _prevBytesIn) / seconds);
-            }
-        }
-
-        _prevBytesIn = bytesIn;
-        _prevBytesOut = bytesOut;
-        _prevNetSample = now;
-
-        return (up, down);
-    }
 
     public static string FormatBps(double bytesPerSec)
     {
@@ -130,13 +108,48 @@ internal sealed class MetricsSampler
             : $"{bits / 1_000:0} Kbps";
     }
 
-    private void InitGpu()
+    private void InitCounters()
     {
-        if (NativeMethods.PdhOpenQuery(null, 0, out _gpuQuery) != 0) return;
-        if (NativeMethods.PdhAddEnglishCounter(_gpuQuery, @"\GPU Engine(*)\Utilization Percentage", 0, out _gpuCounter) != 0) return;
+        if (NativeMethods.PdhOpenQuery(null, 0, out _query) != 0) return;
 
-        NativeMethods.PdhCollectQueryData(_gpuQuery);
-        _gpuAvailable = true;
+        _gpuAvailable = NativeMethods.PdhAddEnglishCounter(
+            _query, @"\GPU Engine(*)\Utilization Percentage", 0, out _gpuCounter) == 0;
+
+        // Los contadores de red entregan la tasa ya calculada, así que no hay
+        // que guardar totales previos ni medir el intervalo a mano.
+        _netAvailable =
+            NativeMethods.PdhAddEnglishCounter(_query, @"\Network Interface(*)\Bytes Sent/sec", 0, out _netSentCounter) == 0 &&
+            NativeMethods.PdhAddEnglishCounter(_query, @"\Network Interface(*)\Bytes Received/sec", 0, out _netRecvCounter) == 0;
+
+        NativeMethods.PdhCollectQueryData(_query);
+    }
+
+    private static unsafe double SumCounter(nint counter)
+    {
+        uint bufferSize = 0, itemCount = 0;
+        uint status = NativeMethods.PdhGetFormattedCounterArrayW(
+            counter, NativeMethods.PDH_FMT_DOUBLE, ref bufferSize, ref itemCount, 0);
+        if (status != NativeMethods.PDH_MORE_DATA || bufferSize == 0) return 0;
+
+        nint buffer = Marshal.AllocHGlobal((int)bufferSize);
+        try
+        {
+            if (NativeMethods.PdhGetFormattedCounterArrayW(
+                    counter, NativeMethods.PDH_FMT_DOUBLE, ref bufferSize, ref itemCount, buffer) != 0)
+                return 0;
+
+            double total = 0;
+            var items = (NativeMethods.PDH_FMT_COUNTERVALUE_ITEM_W*)buffer;
+            for (int i = 0; i < itemCount; i++)
+                if (items[i].CStatus == 0)
+                    total += items[i].doubleValue;
+
+            return total;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 
     // Windows no expone un "GPU%" único: hay una instancia de contador por
@@ -146,7 +159,6 @@ internal sealed class MetricsSampler
     private unsafe double? SampleGpu()
     {
         if (!_gpuAvailable) return null;
-        if (NativeMethods.PdhCollectQueryData(_gpuQuery) != 0) return null;
 
         uint bufferSize = 0, itemCount = 0;
         uint status = NativeMethods.PdhGetFormattedCounterArrayW(

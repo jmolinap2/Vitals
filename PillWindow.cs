@@ -47,9 +47,14 @@ internal readonly record struct Accent(uint Stroke, uint FillTop, uint FillBotto
 internal static class PillWindow
 {
     private const string ClassName = "VitalsPillWindow";
-    private const int ColumnPixelWidth = 96;
+    private static int _columnWidth = 96;
     private const int EdgePadding = 10;
-    private const int PillHeight = 104;
+    private const int HeightWithCharts = 104;
+    private const int HeightCompact = 62;
+    private static int _pillHeight = HeightWithCharts;
+    private static bool _smoothTransitions = true;
+    private static bool _showCharts = true;
+    private static bool _alertColors = true;
     private const int ScreenMargin = 12;
     private const int CornerRadius = 24;
     private const int HistoryLength = 30;
@@ -79,8 +84,9 @@ internal static class PillWindow
     private static readonly RingBuffer NetDownHistory = new(HistoryLength);
     private static readonly RingBuffer BatteryHistory = new(HistoryLength);
 
-    // Colores fijos por métrica, como en la referencia — nada de recoloreo
-    // por umbral: la propia gráfica ya comunica cuándo algo está cargado.
+    // Cada métrica tiene su color de identidad; los umbrales de alerta solo
+    // recolorean el número, para que el aviso se note sin volver ilegible
+    // la fila de gráficas.
     private static readonly Accent CpuAccent = MakeAccent(77, 140, 255);
     private static readonly Accent GpuAccent = MakeAccent(61, 214, 125);
     private static readonly Accent RamAccent = MakeAccent(168, 127, 255);
@@ -99,6 +105,8 @@ internal static class PillWindow
     private static nint _labelBrush;
     private static nint _dividerBrush;
     private static nint _borderPen;
+    private static nint _warnBrush;
+    private static nint _critBrush;
     private static nint _labelFont;
     private static nint _valueFont;
     private static nint _centerFormat;
@@ -152,9 +160,14 @@ internal static class PillWindow
         var config = VitalsConfig.Load();
         _enabledMetrics = config.Metrics.Where(m => m.Enabled).ToList();
         if (_enabledMetrics.Count == 0) _enabledMetrics = VitalsConfig.DefaultOrder();
-        _pillWidth = EdgePadding * 2 + _enabledMetrics.Count * ColumnPixelWidth;
+        _columnWidth = Math.Clamp(config.ColumnWidth, 62, 130);
+        _pillWidth = EdgePadding * 2 + _enabledMetrics.Count * _columnWidth;
         _scale = Math.Clamp(config.Scale, 0.6, 2.0);
         _opacity = (byte)Math.Round(Math.Clamp(config.Opacity, 0.25, 1.0) * 255);
+        _smoothTransitions = config.SmoothTransitions;
+        _showCharts = config.ShowCharts;
+        _alertColors = config.AlertColors;
+        _pillHeight = _showCharts ? HeightWithCharts : HeightCompact;
 
         nint hInstance = GetModuleHandle(null);
         var wndProcPtr = (nint)(delegate* unmanaged<nint, uint, nint, nint, nint>)&WndProc;
@@ -171,7 +184,7 @@ internal static class PillWindow
         RegisterClassEx(ref wndClass);
 
         int deviceWidth = (int)Math.Round(_pillWidth * _scale);
-        int deviceHeight = (int)Math.Round(PillHeight * _scale);
+        int deviceHeight = (int)Math.Round(_pillHeight * _scale);
         int deviceCorner = (int)Math.Round(CornerRadius * _scale);
 
         var workArea = new RECT();
@@ -194,6 +207,8 @@ internal static class PillWindow
         Gdip.GdipCreateSolidFill(Gdip.Argb(255, 0, 0, 0), out _bgBrush);
         Gdip.GdipCreateSolidFill(Gdip.Argb(255, 150, 160, 168), out _labelBrush);
         Gdip.GdipCreateSolidFill(Gdip.Argb(30, 255, 255, 255), out _dividerBrush);
+        Gdip.GdipCreateSolidFill(Gdip.Argb(255, 255, 193, 84), out _warnBrush);
+        Gdip.GdipCreateSolidFill(Gdip.Argb(255, 255, 99, 87), out _critBrush);
         // Borde: define el contorno de la píldora ahora que no hay región.
         Gdip.GdipCreatePen1(Gdip.Argb(60, 255, 255, 255), 1f, Gdip.UnitPixel, out _borderPen);
 
@@ -241,17 +256,17 @@ internal static class PillWindow
         {
             var key = _enabledMetrics[i].Key;
             var col = DescribeMetric(key);
-            float colStart = EdgePadding + i * ColumnPixelWidth;
+            float colStart = EdgePadding + i * _columnWidth;
 
             var probe = new RectF(0, 0, 400, 24);
             Gdip.GdipMeasureString(measureG, col.Label, col.Label.Length, _labelFont,
                 ref probe, _leftFormat, out var bbox, out _, out _);
 
             float comboWidth = iconSize + gap + bbox.Width;
-            col.IconX = colStart + (ColumnPixelWidth - comboWidth) / 2f;
+            col.IconX = colStart + (_columnWidth - comboWidth) / 2f;
             col.LabelRect = new RectF(col.IconX + iconSize + gap, rowIconY - 4, bbox.Width + 4, 22);
-            col.ChartRect = new RectF(colStart + chartPad, 36, ColumnPixelWidth - chartPad * 2, 38);
-            col.ValueRect = new RectF(colStart, 78, ColumnPixelWidth, 22);
+            col.ChartRect = new RectF(colStart + chartPad, 36, _columnWidth - chartPad * 2, 38);
+            col.ValueRect = new RectF(colStart, _showCharts ? 78 : 33, _columnWidth, 22);
             col.DividerX = colStart;
 
             Gdip.GdipCreatePen1(col.Accent.Stroke, 1.6f, Gdip.UnitPixel, out col.Pen);
@@ -392,6 +407,15 @@ internal static class PillWindow
                 NetDownHistory.Push(_animTo.NetDownBytesPerSec);
                 BatteryHistory.Push(Math.Max(_animTo.BatteryPercent, 0));
 
+                // Sin transiciones: un solo repintado por lectura, en vez de
+                // los ~11 que cuesta interpolar durante 350 ms.
+                if (!_smoothTransitions)
+                {
+                    _snapshot = _animTo;
+                    Redraw();
+                    return 0;
+                }
+
                 if (!_animRunning)
                 {
                     _animRunning = true;
@@ -455,7 +479,8 @@ internal static class PillWindow
 
         // Coordenadas lógicas (sin escalar): la transformación del contexto
         // ya las mapea al tamaño real de ventana.
-        nint bgPath = Gdip.RoundRectPath(0.5f, 0.5f, _pillWidth - 1, PillHeight - 1, CornerRadius);
+        float radius = Math.Min(CornerRadius, _pillHeight / 2f - 1);
+        nint bgPath = Gdip.RoundRectPath(0.5f, 0.5f, _pillWidth - 1, _pillHeight - 1, radius);
         Gdip.GdipFillPath(g, _bgBrush, bgPath);
         Gdip.GdipDrawPath(g, _borderPen, bgPath);
         Gdip.GdipDeletePath(bgPath);
@@ -464,7 +489,7 @@ internal static class PillWindow
         for (int i = 0; i < _columns.Length; i++)
         {
             var col = _columns[i];
-            if (i > 0) Gdip.GdipFillRectangle(g, _dividerBrush, col.DividerX, 18, 1, PillHeight - 36);
+            if (i > 0) Gdip.GdipFillRectangle(g, _dividerBrush, col.DividerX, 14, 1, _pillHeight - 28);
             DrawColumn(g, col, s);
         }
 
@@ -489,16 +514,41 @@ internal static class PillWindow
         var labelRect = col.LabelRect;
         Gdip.GdipDrawString(g, col.Label, col.Label.Length, _labelFont, ref labelRect, _leftFormat, _labelBrush);
 
-        double scale = col.DynamicScale ? Math.Max(col.History.Max(), 20_000) : 100;
-        if (col.Chart == ChartKind.Line)
-            DrawLineChart(g, col, scale);
-        else
-            DrawBarChart(g, col, scale);
+        if (_showCharts)
+        {
+            double scale = col.DynamicScale ? Math.Max(col.History.Max(), 20_000) : 100;
+            if (col.Chart == ChartKind.Line)
+                DrawLineChart(g, col, scale);
+            else
+                DrawBarChart(g, col, scale);
+        }
 
         string value = FormatValue(col.Key, s);
         var valueRect = col.ValueRect;
-        Gdip.GdipDrawString(g, value, value.Length, _valueFont, ref valueRect, _centerFormat, col.TextBrush);
+        nint brush = _alertColors
+            ? AlertLevel(col.Key, s) switch { 2 => _critBrush, 1 => _warnBrush, _ => col.TextBrush }
+            : col.TextBrush;
+        Gdip.GdipDrawString(g, value, value.Length, _valueFont, ref valueRect, _centerFormat, brush);
     }
+
+    /// <summary>0 = normal, 1 = aviso, 2 = crítico. La red no tiene umbral: su
+    /// valor "alto" es deseable, no un problema.</summary>
+    private static int AlertLevel(MetricKey key, Snapshot s) => key switch
+    {
+        MetricKey.Cpu => Level(s.CpuPercent, 75, 90),
+        MetricKey.Gpu => s.GpuPercent is { } g ? Level(g, 75, 90) : 0,
+        MetricKey.Ram => Level(s.RamPercent, 80, 92),
+        // Batería al revés: alarma cuando queda poca, y solo con el cargador
+        // desconectado — enchufado, un 8% es normal, no una alerta.
+        MetricKey.Battery => s.OnAc || s.BatteryPercent < 0 ? 0
+            : s.BatteryPercent <= 10 ? 2
+            : s.BatteryPercent <= 20 ? 1
+            : 0,
+        _ => 0,
+    };
+
+    private static int Level(double value, double warn, double crit) =>
+        value >= crit ? 2 : value >= warn ? 1 : 0;
 
     private static string FormatValue(MetricKey key, Snapshot s) => key switch
     {

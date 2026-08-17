@@ -21,8 +21,22 @@ public partial class MainWindow : Window
 
         ScaleSlider.Value = config.Scale;
         OpacitySlider.Value = config.Opacity;
+        WidthSlider.Value = config.ColumnWidth;
+        ChartsCheck.IsChecked = config.ShowCharts;
+        SmoothCheck.IsChecked = config.SmoothTransitions;
+        AlertCheck.IsChecked = config.AlertColors;
         UpdateScaleReadout();
         UpdateOpacityReadout();
+        UpdateWidthReadout();
+    }
+
+    private void WidthSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e) =>
+        UpdateWidthReadout();
+
+    private void UpdateWidthReadout()
+    {
+        if (WidthReadout is not null)
+            WidthReadout.Text = $"{WidthSlider.Value:0} px";
     }
 
     private void ScaleSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e) =>
@@ -64,6 +78,10 @@ public partial class MainWindow : Window
             Metrics = _rows.Select(r => new MetricEntry { Key = r.Key, Enabled = r.Enabled }).ToList(),
             Scale = ScaleSlider.Value,
             Opacity = OpacitySlider.Value,
+            ShowCharts = ChartsCheck.IsChecked == true,
+            SmoothTransitions = SmoothCheck.IsChecked == true,
+            AlertColors = AlertCheck.IsChecked == true,
+            ColumnWidth = (int)WidthSlider.Value,
         };
         config.Save();
 
