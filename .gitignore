@@ -1,0 +1,48 @@
+# Build output
+bin/
+obj/
+publish/
+out/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# NuGet
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+
+# NativeAOT / trimming artifacts
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll.config
+
+# Test results
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Local secrets/config
+*.local.json
+appsettings.*.local.json
+.vscode/settings.json
