@@ -15,4 +15,12 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Remove="Vitals.Shared\**" />
+    <Compile Remove="Vitals.Settings\**" />
+    <None Remove="Vitals.Shared\**" />
+    <None Remove="Vitals.Settings\**" />
+    <ProjectReference Include="Vitals.Shared\Vitals.Shared.csproj" />
+  </ItemGroup>
+
 </Project>

@@ -21,6 +21,19 @@ internal static class NativeMethods
     public const uint WM_RBUTTONUP = 0x0205;
     public const uint WM_NCHITTEST = 0x0084;
     public const uint WM_NCRBUTTONUP = 0x00A5;
+    public const uint WM_LBUTTONUP = 0x0202;
+    public const uint WM_COMMAND = 0x0111;
+    public const uint WM_TRAYICON = 0x8000 + 1; // WM_APP + 1
+
+    public const uint NIM_ADD = 0;
+    public const uint NIM_DELETE = 2;
+    public const uint NIF_MESSAGE = 0x1;
+    public const uint NIF_ICON = 0x2;
+    public const uint MF_STRING = 0x0;
+    public const uint TPM_RIGHTBUTTON = 0x0002;
+    public const uint TrayIconId = 1;
+    public const nint IdExit = 1001;
+    public const nint IdSettings = 1002;
 
     public const nint HTCAPTION = 2;
 
@@ -175,6 +188,43 @@ internal static class NativeMethods
 
     [DllImport("pdh.dll")]
     public static extern uint PdhGetFormattedCounterArrayW(nint hCounter, uint dwFormat, ref uint lpdwBufferSize, ref uint lpdwItemCount, nint itemBuffer);
+
+    // ---- bandeja del sistema ----
+
+    public unsafe struct NOTIFYICONDATA
+    {
+        public uint cbSize;
+        public nint hWnd;
+        public uint uID;
+        public uint uFlags;
+        public uint uCallbackMessage;
+        public nint hIcon;
+        public fixed char szTip[128];
+    }
+
+    [DllImport("shell32.dll")]
+    public static extern bool Shell_NotifyIcon(uint dwMessage, ref NOTIFYICONDATA lpData);
+
+    [DllImport("user32.dll")]
+    public static extern nint LoadIcon(nint hInstance, nint lpIconName);
+
+    [DllImport("user32.dll")]
+    public static extern nint CreatePopupMenu();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool AppendMenu(nint hMenu, uint uFlags, nint uIDNewItem, string lpNewItem);
+
+    [DllImport("user32.dll")]
+    public static extern bool TrackPopupMenu(nint hMenu, uint uFlags, int x, int y, int nReserved, nint hWnd, nint prcRect);
+
+    [DllImport("user32.dll")]
+    public static extern bool DestroyMenu(nint hMenu);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(nint hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT lpPoint);
 
     // ---- user32.dll ----
 

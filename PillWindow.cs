@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using Vitals.Shared;
 using static Vitals.NativeMethods;
 
 namespace Vitals;
@@ -36,12 +38,14 @@ internal readonly record struct Accent(uint Stroke, uint Fill, uint Text);
 internal static class PillWindow
 {
     private const string ClassName = "VitalsPillWindow";
-    private const int PillWidth = 576;
+    private const int ColumnPixelWidth = 96;
     private const int PillHeight = 104;
     private const int ScreenMargin = 12;
-    private const int ColumnCount = 6;
     private const int CornerRadius = 24;
     private const int HistoryLength = 30;
+
+    private static List<MetricEntry> _enabledMetrics = [];
+    private static int _pillWidth;
 
     private const nint DataTimerId = 1;
     private const nint AnimTimerId = 2;
@@ -75,6 +79,7 @@ internal static class PillWindow
         Fill: Gdip.Argb(46, r, g, b),
         Text: Gdip.Argb(255, r, g, b));
 
+    private static NOTIFYICONDATA _trayIcon;
     private static nint _bgBrush;
     private static nint _labelBrush;
     private static nint _labelFont;
@@ -85,6 +90,11 @@ internal static class PillWindow
     public static unsafe void Run()
     {
         Gdip.Startup();
+
+        var config = VitalsConfig.Load();
+        _enabledMetrics = config.Metrics.Where(m => m.Enabled).ToList();
+        if (_enabledMetrics.Count == 0) _enabledMetrics = VitalsConfig.DefaultOrder();
+        _pillWidth = _enabledMetrics.Count * ColumnPixelWidth;
 
         nint hInstance = GetModuleHandle(null);
         var wndProcPtr = (nint)(delegate* unmanaged<nint, uint, nint, nint, nint>)&WndProc;
@@ -102,19 +112,19 @@ internal static class PillWindow
 
         var workArea = new RECT();
         SystemParametersInfo(SPI_GETWORKAREA, 0, ref workArea, 0);
-        int x = workArea.Right - PillWidth - ScreenMargin;
+        int x = workArea.Right - _pillWidth - ScreenMargin;
         int y = workArea.Bottom - PillHeight - ScreenMargin;
 
         nint hwnd = CreateWindowEx(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             ClassName, "Vitals",
             WS_POPUP,
-            x, y, PillWidth, PillHeight,
+            x, y, _pillWidth, PillHeight,
             0, 0, hInstance, 0);
 
         if (hwnd == 0) return;
 
-        SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, PillWidth, PillHeight, CornerRadius * 2, CornerRadius * 2), true);
+        SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, _pillWidth, PillHeight, CornerRadius * 2, CornerRadius * 2), true);
         SetLayeredWindowAttributes(hwnd, 0, 250, LWA_ALPHA);
 
         _bgBrush = 0;
@@ -134,6 +144,8 @@ internal static class PillWindow
         Gdip.GdipSetStringFormatAlign(_leftFormat, Gdip.StringAlignNear);
         Gdip.GdipSetStringFormatLineAlign(_leftFormat, Gdip.StringAlignCenter);
 
+        AddTrayIcon(hwnd);
+
         _snapshot = _animFrom = _animTo = Sampler.Sample();
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetTimer(hwnd, DataTimerId, 1000, 0);
@@ -143,6 +155,40 @@ internal static class PillWindow
             TranslateMessage(ref msg);
             DispatchMessage(ref msg);
         }
+
+        Shell_NotifyIcon(NIM_DELETE, ref _trayIcon);
+    }
+
+    private static unsafe void AddTrayIcon(nint hwnd)
+    {
+        _trayIcon = new NOTIFYICONDATA
+        {
+            cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATA>(),
+            hWnd = hwnd,
+            uID = TrayIconId,
+            uFlags = NIF_MESSAGE | NIF_ICON,
+            uCallbackMessage = WM_TRAYICON,
+            hIcon = LoadIcon(0, (nint)32512), // IDI_APPLICATION — ícono propio queda como pulido posterior
+        };
+        Shell_NotifyIcon(NIM_ADD, ref _trayIcon);
+    }
+
+    private static void ShowTrayMenu(nint hwnd)
+    {
+        GetCursorPos(out var pt);
+        nint menu = CreatePopupMenu();
+        AppendMenu(menu, MF_STRING, IdSettings, "Configuración...");
+        AppendMenu(menu, MF_STRING, IdExit, "Salir");
+        SetForegroundWindow(hwnd);
+        TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.X, pt.Y, 0, hwnd, 0);
+        DestroyMenu(menu);
+    }
+
+    private static void OpenSettings()
+    {
+        string settingsExe = Path.Combine(AppContext.BaseDirectory, "VitalsSettings.exe");
+        if (File.Exists(settingsExe))
+            Process.Start(settingsExe);
     }
 
     [UnmanagedCallersOnly]
@@ -190,8 +236,16 @@ internal static class PillWindow
             case WM_NCHITTEST:
                 return HTCAPTION;
 
-            case WM_NCRBUTTONUP:
+            case WM_TRAYICON when lParam == (nint)WM_RBUTTONUP || lParam == (nint)WM_LBUTTONUP:
+                ShowTrayMenu(hWnd);
+                return 0;
+
+            case WM_COMMAND when wParam == IdExit:
                 PostQuitMessage(0);
+                return 0;
+
+            case WM_COMMAND when wParam == IdSettings:
+                OpenSettings();
                 return 0;
 
             case WM_DESTROY:
@@ -232,34 +286,54 @@ internal static class PillWindow
         Gdip.GdipFillPath(g, _bgBrush, bgPath);
         Gdip.GdipDeletePath(bgPath);
 
-        float colWidth = client.Width / (float)ColumnCount;
+        float colWidth = client.Width / (float)_enabledMetrics.Count;
         var s = _snapshot;
 
-        DrawColumn(g, 0, colWidth, IconKind.Cpu, "CPU", CpuAccent,
-            chart: (gr, x, y, w, h) => DrawLineChart(gr, CpuHistory, x, y, w, h, CpuAccent, 100),
-            value: $"{s.CpuPercent:0}%");
-
-        DrawColumn(g, 1, colWidth, IconKind.Gpu, "GPU", GpuAccent,
-            chart: (gr, x, y, w, h) => DrawLineChart(gr, GpuHistory, x, y, w, h, GpuAccent, 100),
-            value: s.GpuPercent is { } gpu ? $"{gpu:0}%" : "—");
-
-        DrawColumn(g, 2, colWidth, IconKind.Ram, "RAM", RamAccent,
-            chart: (gr, x, y, w, h) => DrawBarChart(gr, RamHistory, x, y, w, h, RamAccent, 100),
-            value: $"{s.RamPercent}%");
-
-        DrawColumn(g, 3, colWidth, IconKind.Up, "Subida", UpAccent,
-            chart: (gr, x, y, w, h) => DrawBarChart(gr, NetUpHistory, x, y, w, h, UpAccent, Math.Max(NetUpHistory.Max(), 20_000)),
-            value: MetricsSampler.FormatBps(s.NetUpBytesPerSec));
-
-        DrawColumn(g, 4, colWidth, IconKind.Down, "Bajada", DownAccent,
-            chart: (gr, x, y, w, h) => DrawBarChart(gr, NetDownHistory, x, y, w, h, DownAccent, Math.Max(NetDownHistory.Max(), 20_000)),
-            value: MetricsSampler.FormatBps(s.NetDownBytesPerSec));
-
-        DrawColumn(g, 5, colWidth, IconKind.Battery, "Batería", BatteryAccent,
-            chart: null,
-            value: s.BatteryPercent < 0 ? "—" : $"{s.BatteryPercent}%{(s.OnAc ? " ⚡" : "")}");
+        for (int i = 0; i < _enabledMetrics.Count; i++)
+            DrawMetricColumn(g, i, colWidth, _enabledMetrics[i].Key, s);
 
         Gdip.GdipDeleteGraphics(g);
+    }
+
+    private static void DrawMetricColumn(nint g, int index, float colWidth, MetricKey key, Snapshot s)
+    {
+        switch (key)
+        {
+            case MetricKey.Cpu:
+                DrawColumn(g, index, colWidth, IconKind.Cpu, "CPU", CpuAccent,
+                    (gr, x, y, w, h) => DrawLineChart(gr, CpuHistory, x, y, w, h, CpuAccent, 100),
+                    $"{s.CpuPercent:0}%");
+                break;
+
+            case MetricKey.Gpu:
+                DrawColumn(g, index, colWidth, IconKind.Gpu, "GPU", GpuAccent,
+                    (gr, x, y, w, h) => DrawLineChart(gr, GpuHistory, x, y, w, h, GpuAccent, 100),
+                    s.GpuPercent is { } gpu ? $"{gpu:0}%" : "—");
+                break;
+
+            case MetricKey.Ram:
+                DrawColumn(g, index, colWidth, IconKind.Ram, "RAM", RamAccent,
+                    (gr, x, y, w, h) => DrawBarChart(gr, RamHistory, x, y, w, h, RamAccent, 100),
+                    $"{s.RamPercent}%");
+                break;
+
+            case MetricKey.Up:
+                DrawColumn(g, index, colWidth, IconKind.Up, "Subida", UpAccent,
+                    (gr, x, y, w, h) => DrawBarChart(gr, NetUpHistory, x, y, w, h, UpAccent, Math.Max(NetUpHistory.Max(), 20_000)),
+                    MetricsSampler.FormatBps(s.NetUpBytesPerSec));
+                break;
+
+            case MetricKey.Down:
+                DrawColumn(g, index, colWidth, IconKind.Down, "Bajada", DownAccent,
+                    (gr, x, y, w, h) => DrawBarChart(gr, NetDownHistory, x, y, w, h, DownAccent, Math.Max(NetDownHistory.Max(), 20_000)),
+                    MetricsSampler.FormatBps(s.NetDownBytesPerSec));
+                break;
+
+            case MetricKey.Battery:
+                DrawColumn(g, index, colWidth, IconKind.Battery, "Batería", BatteryAccent, null,
+                    s.BatteryPercent < 0 ? "—" : $"{s.BatteryPercent}%{(s.OnAc ? " ⚡" : "")}");
+                break;
+        }
     }
 
     private static void DrawColumn(nint g, int index, float colWidth, IconKind icon, string label, Accent accent,
