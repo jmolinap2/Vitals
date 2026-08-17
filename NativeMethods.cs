@@ -21,6 +21,7 @@ internal static class NativeMethods
     public const uint WM_LBUTTONUP = 0x0202;
     public const uint WM_COMMAND = 0x0111;
     public const uint WM_TRAYICON = 0x8000 + 1; // WM_APP + 1
+    public const uint WM_RELOAD_CONFIG = 0x8000 + 2; // WM_APP + 2
 
     public const uint NIM_ADD = 0;
     public const uint NIM_DELETE = 2;
@@ -220,6 +221,12 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(nint hWnd, int nCmdShow);
+
+    public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_NOACTIVATE = 0x0010;
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 
     [DllImport("user32.dll")]
     public static extern nint LoadCursor(nint hInstance, nint lpCursorName);

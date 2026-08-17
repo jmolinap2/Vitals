@@ -62,6 +62,7 @@ internal static class PillWindow
     private static List<MetricEntry> _enabledMetrics = [];
     private static int _pillWidth; // ancho lógico (sin escalar) — GDI+ escala todo con una sola transformación
     private static double _scale = 1.0;
+    private static double _fontScale = 1.0;
     private static byte _opacity = 242;
     private static nint _hwnd;
 
@@ -153,21 +154,70 @@ internal static class PillWindow
 
     private static ColumnLayout[] _columns = [];
 
-    public static unsafe void Run()
+    private static void ApplyConfig(VitalsConfig config)
     {
-        Gdip.Startup();
-
-        var config = VitalsConfig.Load();
         _enabledMetrics = config.Metrics.Where(m => m.Enabled).ToList();
         if (_enabledMetrics.Count == 0) _enabledMetrics = VitalsConfig.DefaultOrder();
         _columnWidth = Math.Clamp(config.ColumnWidth, 62, 130);
         _pillWidth = EdgePadding * 2 + _enabledMetrics.Count * _columnWidth;
         _scale = Math.Clamp(config.Scale, 0.6, 2.0);
+        _fontScale = Math.Clamp(config.FontScale, 0.7, 1.3);
         _opacity = (byte)Math.Round(Math.Clamp(config.Opacity, 0.25, 1.0) * 255);
         _smoothTransitions = config.SmoothTransitions;
         _showCharts = config.ShowCharts;
         _alertColors = config.AlertColors;
         _pillHeight = _showCharts ? HeightWithCharts : HeightCompact;
+    }
+
+    /// <summary>
+    /// Ajustes guardó config.json y avisó por mensaje de ventana — no hay
+    /// que matar el proceso: se reposiciona/redimensiona en caliente.
+    /// </summary>
+    private static void ReloadConfig()
+    {
+        ApplyConfig(VitalsConfig.Load());
+
+        int deviceWidth = (int)Math.Round(_pillWidth * _scale);
+        int deviceHeight = (int)Math.Round(_pillHeight * _scale);
+
+        var workArea = new RECT();
+        SystemParametersInfo(SPI_GETWORKAREA, 0, ref workArea, 0);
+        int x = workArea.Right - deviceWidth - ScreenMargin;
+        int y = workArea.Bottom - deviceHeight - ScreenMargin;
+        SetWindowPos(_hwnd, 0, x, y, deviceWidth, deviceHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+
+        DisposeColumnLayout();
+        BuildColumnLayout();
+
+        DisposeBackBuffer();
+        CreateBackBuffer(deviceWidth, deviceHeight);
+
+        Redraw();
+    }
+
+    private static void DisposeColumnLayout()
+    {
+        foreach (var col in _columns)
+        {
+            Gdip.GdipDeletePen(col.Pen);
+            Gdip.GdipDeleteBrush(col.AccentBrush);
+            Gdip.GdipDeleteBrush(col.TextBrush);
+            Gdip.GdipDeleteBrush(col.GradientBrush);
+        }
+    }
+
+    private static void DisposeBackBuffer()
+    {
+        Gdip.GdipDeleteGraphics(_graphics);
+        Gdip.GdipDisposeImage(_gdipBitmap);
+        DeleteObject(_backBmp);
+        DeleteDC(_backDc);
+    }
+
+    public static unsafe void Run()
+    {
+        Gdip.Startup();
+        ApplyConfig(VitalsConfig.Load());
 
         nint hInstance = GetModuleHandle(null);
         var wndProcPtr = (nint)(delegate* unmanaged<nint, uint, nint, nint, nint>)&WndProc;
@@ -212,18 +262,17 @@ internal static class PillWindow
         // Borde: define el contorno de la píldora ahora que no hay región.
         Gdip.GdipCreatePen1(Gdip.Argb(60, 255, 255, 255), 1f, Gdip.UnitPixel, out _borderPen);
 
-        Gdip.GdipCreateFontFamilyFromName("Segoe UI", 0, out nint labelFamily);
-        Gdip.GdipCreateFont(labelFamily, 12.5f, Gdip.FontStyleRegular, Gdip.UnitPixel, out _labelFont);
-        Gdip.GdipCreateFontFamilyFromName("Cascadia Mono", 0, out nint valueFamily);
-        Gdip.GdipCreateFont(valueFamily, 17f, Gdip.FontStyleBold, Gdip.UnitPixel, out _valueFont);
+        CreateFonts();
 
         Gdip.GdipCreateStringFormat(0, 0, out _centerFormat);
         Gdip.GdipSetStringFormatAlign(_centerFormat, Gdip.StringAlignCenter);
         Gdip.GdipSetStringFormatLineAlign(_centerFormat, Gdip.StringAlignCenter);
+        Gdip.GdipSetStringFormatFlags(_centerFormat, Gdip.StringFormatFlagsNoWrap);
 
         Gdip.GdipCreateStringFormat(0, 0, out _leftFormat);
         Gdip.GdipSetStringFormatAlign(_leftFormat, Gdip.StringAlignNear);
         Gdip.GdipSetStringFormatLineAlign(_leftFormat, Gdip.StringAlignCenter);
+        Gdip.GdipSetStringFormatFlags(_leftFormat, Gdip.StringFormatFlagsNoWrap);
 
         BuildColumnLayout();
         CreateBackBuffer(deviceWidth, deviceHeight);
@@ -438,6 +487,10 @@ internal static class PillWindow
                 Redraw();
                 return 0;
 
+            case WM_RELOAD_CONFIG:
+                ReloadConfig();
+                return 0;
+
             case WM_NCHITTEST:
                 return HTCAPTION;
 
@@ -509,6 +562,11 @@ internal static class PillWindow
     {
         const float iconSize = 15, rowIconY = 13;
 
+        // Recorta al espacio propio de la columna: con anchos angostos el
+        // ícono, la etiqueta o el valor pueden medir más que la columna, y
+        // sin esto se dibujan encima de la columna vecina.
+        Gdip.GdipSetClipRect(g, col.DividerX, 0, _columnWidth, _pillHeight, Gdip.CombineModeReplace);
+
         DrawIcon(g, col.Icon, col.IconX, rowIconY, iconSize, col.Pen, col.AccentBrush);
 
         var labelRect = col.LabelRect;
@@ -529,6 +587,8 @@ internal static class PillWindow
             ? AlertLevel(col.Key, s) switch { 2 => _critBrush, 1 => _warnBrush, _ => col.TextBrush }
             : col.TextBrush;
         Gdip.GdipDrawString(g, value, value.Length, _valueFont, ref valueRect, _centerFormat, brush);
+
+        Gdip.GdipResetClip(g);
     }
 
     /// <summary>0 = normal, 1 = aviso, 2 = crítico. La red no tiene umbral: su

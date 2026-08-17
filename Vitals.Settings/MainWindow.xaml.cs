@@ -85,15 +85,19 @@ public partial class MainWindow : Window
         };
         config.Save();
 
-        foreach (var proc in Process.GetProcessesByName("Vitals"))
+        // Vitals aplica los cambios en caliente (se redimensiona y se
+        // reposiciona) — no hace falta matar el proceso ni relanzarlo.
+        nint hwnd = NativeInterop.FindWindow("VitalsPillWindow", null);
+        if (hwnd != 0)
         {
-            proc.Kill();
-            proc.WaitForExit(2000);
+            NativeInterop.PostMessage(hwnd, NativeInterop.WM_RELOAD_CONFIG, 0, 0);
         }
-
-        string vitalsExe = Path.Combine(AppContext.BaseDirectory, "Vitals.exe");
-        if (File.Exists(vitalsExe))
-            Process.Start(vitalsExe);
+        else
+        {
+            string vitalsExe = Path.Combine(AppContext.BaseDirectory, "Vitals.exe");
+            if (File.Exists(vitalsExe))
+                Process.Start(vitalsExe);
+        }
 
         Close();
     }

@@ -29,6 +29,9 @@ public sealed class VitalsConfig
     /// <summary>Pinta el valor en ámbar/rojo al superar los umbrales de alerta.</summary>
     public bool AlertColors { get; set; } = true;
 
+    /// <summary>Multiplicador sobre el tamaño base de etiquetas y valores — independiente de Scale.</summary>
+    public double FontScale { get; set; } = 1.0;
+
     public static List<MetricEntry> DefaultOrder() =>
     [
         new() { Key = MetricKey.Cpu },

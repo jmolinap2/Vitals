@@ -49,6 +49,17 @@ internal static class Gdip
     public const int StringAlignCenter = 1;
     public const int WrapModeTile = 0;
     public const int MatrixOrderPrepend = 0;
+    public const int StringFormatFlagsNoWrap = 0x1000;
+    public const int CombineModeReplace = 0;
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipSetStringFormatFlags(nint format, int flags);
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipSetClipRect(nint graphics, float x, float y, float width, float height, int combineMode);
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipResetClip(nint graphics);
 
     [DllImport("gdiplus.dll")]
     public static extern int GdiplusStartup(out nint token, ref GdiplusStartupInput input, nint output);
@@ -145,6 +156,12 @@ internal static class Gdip
 
     [DllImport("gdiplus.dll")]
     public static extern int GdipCreateFont(nint family, float emSize, int style, int unit, out nint font);
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipDeleteFont(nint font);
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipDeleteFontFamily(nint family);
 
     [DllImport("gdiplus.dll")]
     public static extern int GdipCreateStringFormat(int formatAttributes, int language, out nint format);
