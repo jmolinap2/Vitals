@@ -186,6 +186,8 @@ internal static class PillWindow
         int y = workArea.Bottom - deviceHeight - ScreenMargin;
         SetWindowPos(_hwnd, 0, x, y, deviceWidth, deviceHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 
+        CreateFonts();
+
         DisposeColumnLayout();
         BuildColumnLayout();
 
@@ -193,6 +195,23 @@ internal static class PillWindow
         CreateBackBuffer(deviceWidth, deviceHeight);
 
         Redraw();
+    }
+
+    private const float BaseLabelSize = 12.5f;
+    private const float BaseValueSize = 17f;
+
+    private static void CreateFonts()
+    {
+        if (_labelFont != 0) Gdip.GdipDeleteFont(_labelFont);
+        if (_valueFont != 0) Gdip.GdipDeleteFont(_valueFont);
+
+        Gdip.GdipCreateFontFamilyFromName("Segoe UI", 0, out nint labelFamily);
+        Gdip.GdipCreateFont(labelFamily, BaseLabelSize * (float)_fontScale, Gdip.FontStyleRegular, Gdip.UnitPixel, out _labelFont);
+        Gdip.GdipDeleteFontFamily(labelFamily);
+
+        Gdip.GdipCreateFontFamilyFromName("Cascadia Mono", 0, out nint valueFamily);
+        Gdip.GdipCreateFont(valueFamily, BaseValueSize * (float)_fontScale, Gdip.FontStyleBold, Gdip.UnitPixel, out _valueFont);
+        Gdip.GdipDeleteFontFamily(valueFamily);
     }
 
     private static void DisposeColumnLayout()

@@ -252,6 +252,26 @@
                     <StackPanel>
                         <StackPanel Style="{StaticResource SliderBlock}">
                             <Grid>
+                                <TextBlock Text="Tamaño de letra" Foreground="{StaticResource TextBrush}"
+                                           FontSize="13.5" VerticalAlignment="Center"/>
+                                <Border HorizontalAlignment="Right" Background="#222833" CornerRadius="5" Padding="8,3">
+                                    <TextBlock x:Name="FontReadout" Text="100%" Foreground="{StaticResource TextBrush}"
+                                               FontSize="12" FontFamily="Consolas"/>
+                                </Border>
+                            </Grid>
+                            <Slider x:Name="FontSlider" Style="{StaticResource SizeSlider}"
+                                    Minimum="0.7" Maximum="1.3" Value="1.0"
+                                    IsSnapToTickEnabled="True" TickFrequency="0.05"
+                                    Margin="0,10,0,2"
+                                    ValueChanged="FontSlider_ValueChanged"/>
+                            <Grid Margin="0,2,0,0">
+                                <TextBlock Text="70%" FontSize="10.5" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Left"/>
+                                <TextBlock Text="130%" FontSize="10.5" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Right"/>
+                            </Grid>
+                        </StackPanel>
+
+                        <StackPanel Style="{StaticResource SliderBlock}">
+                            <Grid>
                                 <TextBlock Text="Opacidad" Foreground="{StaticResource TextBrush}"
                                            FontSize="13.5" VerticalAlignment="Center"/>
                                 <Border HorizontalAlignment="Right" Background="#222833" CornerRadius="5" Padding="8,3">

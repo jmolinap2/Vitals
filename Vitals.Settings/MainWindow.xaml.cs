@@ -22,12 +22,23 @@ public partial class MainWindow : Window
         ScaleSlider.Value = config.Scale;
         OpacitySlider.Value = config.Opacity;
         WidthSlider.Value = config.ColumnWidth;
+        FontSlider.Value = config.FontScale;
         ChartsCheck.IsChecked = config.ShowCharts;
         SmoothCheck.IsChecked = config.SmoothTransitions;
         AlertCheck.IsChecked = config.AlertColors;
         UpdateScaleReadout();
         UpdateOpacityReadout();
         UpdateWidthReadout();
+        UpdateFontReadout();
+    }
+
+    private void FontSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e) =>
+        UpdateFontReadout();
+
+    private void UpdateFontReadout()
+    {
+        if (FontReadout is not null)
+            FontReadout.Text = $"{FontSlider.Value * 100:0}%";
     }
 
     private void WidthSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e) =>
@@ -82,6 +93,7 @@ public partial class MainWindow : Window
             SmoothTransitions = SmoothCheck.IsChecked == true,
             AlertColors = AlertCheck.IsChecked == true,
             ColumnWidth = (int)WidthSlider.Value,
+            FontScale = FontSlider.Value,
         };
         config.Save();
 
