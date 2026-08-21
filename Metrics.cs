@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Linq;
 
 namespace Vitals;
 
@@ -14,12 +13,15 @@ internal readonly struct Snapshot
     public required double NetDownBytesPerSec { get; init; }
 }
 
-internal sealed class MetricsSampler
+internal sealed class MetricsSampler : IDisposable
 {
     private NativeMethods.FILETIME _prevIdle;
     private NativeMethods.FILETIME _prevKernel;
     private NativeMethods.FILETIME _prevUser;
     private bool _hasPrevCpu;
+
+    private readonly bool _wantGpu;
+    private readonly bool _wantNet;
 
     private nint _query;
     private nint _gpuCounter;
@@ -28,7 +30,44 @@ internal sealed class MetricsSampler
     private bool _gpuAvailable;
     private bool _netAvailable;
 
-    public MetricsSampler() => InitCounters();
+    // Buffer nativo reutilizado entre lecturas: dentro de un mismo Sample()
+    // la red y la GPU se procesan una tras otra, así que un único buffer
+    // basta — evita reservar/liberar memoria no administrada varias veces
+    // por segundo.
+    private nint _pdhBuffer;
+    private uint _pdhBufferCapacity;
+
+    private struct EngineBucket { public int Hash; public double Sum; }
+
+    // Acumuladores por tipo de motor GPU (engtype_3D, engtype_Copy...) sin
+    // crear strings ni un Dictionary en cada muestra: cada entrada guarda el
+    // hash del sufijo del nombre y su suma. La cantidad de tipos reales es
+    // pequeña y estable, así que el array persistente casi nunca crece.
+    private EngineBucket[] _engineBuckets = new EngineBucket[16];
+    private int _engineBucketCount;
+
+    public MetricsSampler(bool enableGpu, bool enableNet)
+    {
+        _wantGpu = enableGpu;
+        _wantNet = enableNet;
+        InitCounters();
+    }
+
+    public void Dispose()
+    {
+        if (_query != 0)
+        {
+            NativeMethods.PdhCloseQuery(_query);
+            _query = 0;
+        }
+
+        if (_pdhBuffer != 0)
+        {
+            Marshal.FreeHGlobal(_pdhBuffer);
+            _pdhBuffer = 0;
+            _pdhBufferCapacity = 0;
+        }
+    }
 
     public Snapshot Sample()
     {
@@ -99,7 +138,6 @@ internal sealed class MetricsSampler
         return status.BatteryLifePercent <= 100 ? status.BatteryLifePercent : -1;
     }
 
-
     public static string FormatBps(double bytesPerSec)
     {
         double bits = bytesPerSec * 8;
@@ -110,52 +148,61 @@ internal sealed class MetricsSampler
 
     private void InitCounters()
     {
+        if (!_wantGpu && !_wantNet) return;
         if (NativeMethods.PdhOpenQuery(null, 0, out _query) != 0) return;
 
-        _gpuAvailable = NativeMethods.PdhAddEnglishCounter(
-            _query, @"\GPU Engine(*)\Utilization Percentage", 0, out _gpuCounter) == 0;
+        if (_wantGpu)
+            _gpuAvailable = NativeMethods.PdhAddEnglishCounter(
+                _query, @"\GPU Engine(*)\Utilization Percentage", 0, out _gpuCounter) == 0;
 
         // Los contadores de red entregan la tasa ya calculada, así que no hay
         // que guardar totales previos ni medir el intervalo a mano.
-        _netAvailable =
-            NativeMethods.PdhAddEnglishCounter(_query, @"\Network Interface(*)\Bytes Sent/sec", 0, out _netSentCounter) == 0 &&
-            NativeMethods.PdhAddEnglishCounter(_query, @"\Network Interface(*)\Bytes Received/sec", 0, out _netRecvCounter) == 0;
+        if (_wantNet)
+            _netAvailable =
+                NativeMethods.PdhAddEnglishCounter(_query, @"\Network Interface(*)\Bytes Sent/sec", 0, out _netSentCounter) == 0 &&
+                NativeMethods.PdhAddEnglishCounter(_query, @"\Network Interface(*)\Bytes Received/sec", 0, out _netRecvCounter) == 0;
 
         NativeMethods.PdhCollectQueryData(_query);
     }
 
-    private static unsafe double SumCounter(nint counter)
+    private nint EnsurePdhBuffer(uint requiredSize)
+    {
+        if (requiredSize > _pdhBufferCapacity)
+        {
+            _pdhBuffer = _pdhBuffer == 0
+                ? Marshal.AllocHGlobal((nint)requiredSize)
+                : Marshal.ReAllocHGlobal(_pdhBuffer, (nint)requiredSize);
+            _pdhBufferCapacity = requiredSize;
+        }
+        return _pdhBuffer;
+    }
+
+    private unsafe double SumCounter(nint counter)
     {
         uint bufferSize = 0, itemCount = 0;
         uint status = NativeMethods.PdhGetFormattedCounterArrayW(
             counter, NativeMethods.PDH_FMT_DOUBLE, ref bufferSize, ref itemCount, 0);
         if (status != NativeMethods.PDH_MORE_DATA || bufferSize == 0) return 0;
 
-        nint buffer = Marshal.AllocHGlobal((int)bufferSize);
-        try
-        {
-            if (NativeMethods.PdhGetFormattedCounterArrayW(
-                    counter, NativeMethods.PDH_FMT_DOUBLE, ref bufferSize, ref itemCount, buffer) != 0)
-                return 0;
+        nint buffer = EnsurePdhBuffer(bufferSize);
+        if (NativeMethods.PdhGetFormattedCounterArrayW(
+                counter, NativeMethods.PDH_FMT_DOUBLE, ref bufferSize, ref itemCount, buffer) != 0)
+            return 0;
 
-            double total = 0;
-            var items = (NativeMethods.PDH_FMT_COUNTERVALUE_ITEM_W*)buffer;
-            for (int i = 0; i < itemCount; i++)
-                if (items[i].CStatus == 0)
-                    total += items[i].doubleValue;
+        double total = 0;
+        var items = (NativeMethods.PDH_FMT_COUNTERVALUE_ITEM_W*)buffer;
+        for (int i = 0; i < itemCount; i++)
+            if (items[i].CStatus == 0)
+                total += items[i].doubleValue;
 
-            return total;
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
+        return total;
     }
 
     // Windows no expone un "GPU%" único: hay una instancia de contador por
     // proceso y por motor (3D, copy, video decode...). El Administrador de
     // tareas suma por tipo de motor y toma el máximo entre motores — esa es
-    // la aproximación que replicamos aquí.
+    // la aproximación que replicamos aquí, sin asignar strings ni un
+    // Dictionary en cada muestra.
     private unsafe double? SampleGpu()
     {
         if (!_gpuAvailable) return null;
@@ -165,35 +212,72 @@ internal sealed class MetricsSampler
             _gpuCounter, NativeMethods.PDH_FMT_DOUBLE, ref bufferSize, ref itemCount, 0);
         if (status != NativeMethods.PDH_MORE_DATA || bufferSize == 0) return 0;
 
-        nint buffer = Marshal.AllocHGlobal((int)bufferSize);
-        try
+        nint buffer = EnsurePdhBuffer(bufferSize);
+        status = NativeMethods.PdhGetFormattedCounterArrayW(
+            _gpuCounter, NativeMethods.PDH_FMT_DOUBLE, ref bufferSize, ref itemCount, buffer);
+        if (status != 0) return 0;
+
+        _engineBucketCount = 0;
+        var items = (NativeMethods.PDH_FMT_COUNTERVALUE_ITEM_W*)buffer;
+        for (int i = 0; i < itemCount; i++)
         {
-            status = NativeMethods.PdhGetFormattedCounterArrayW(
-                _gpuCounter, NativeMethods.PDH_FMT_DOUBLE, ref bufferSize, ref itemCount, buffer);
-            if (status != 0) return 0;
+            if (items[i].CStatus != 0) continue;
 
-            var byEngineType = new Dictionary<string, double>();
-            int itemSize = Marshal.SizeOf<NativeMethods.PDH_FMT_COUNTERVALUE_ITEM_W>();
+            char* name = (char*)items[i].szName;
+            int nameLen = 0;
+            while (name[nameLen] != '\0') nameLen++;
 
-            for (int i = 0; i < itemCount; i++)
+            int idx = FindEngtype(name, nameLen);
+            char* typeStart = idx >= 0 ? name + idx : name;
+            int typeLen = idx >= 0 ? nameLen - idx : nameLen;
+
+            AddToBucket(HashSuffix(typeStart, typeLen), items[i].doubleValue);
+        }
+
+        double max = 0;
+        for (int i = 0; i < _engineBucketCount; i++)
+            if (_engineBuckets[i].Sum > max) max = _engineBuckets[i].Sum;
+
+        return Math.Clamp(max, 0, 100);
+    }
+
+    private static unsafe int FindEngtype(char* name, int nameLen)
+    {
+        ReadOnlySpan<char> needle = "engtype_";
+        for (int i = 0; i <= nameLen - needle.Length; i++)
+        {
+            int j = 0;
+            while (j < needle.Length && name[i + j] == needle[j]) j++;
+            if (j == needle.Length) return i;
+        }
+        return -1;
+    }
+
+    private static unsafe int HashSuffix(char* start, int len)
+    {
+        uint hash = 2166136261;
+        for (int i = 0; i < len; i++)
+        {
+            hash ^= start[i];
+            hash *= 16777619;
+        }
+        return unchecked((int)hash);
+    }
+
+    private void AddToBucket(int hash, double value)
+    {
+        for (int i = 0; i < _engineBucketCount; i++)
+        {
+            if (_engineBuckets[i].Hash == hash)
             {
-                var item = Marshal.PtrToStructure<NativeMethods.PDH_FMT_COUNTERVALUE_ITEM_W>(buffer + i * itemSize);
-                if (item.CStatus != 0) continue;
-
-                string name = Marshal.PtrToStringUni(item.szName) ?? "";
-                int idx = name.LastIndexOf("engtype_", StringComparison.Ordinal);
-                string engineType = idx >= 0 ? name[idx..] : "unknown";
-
-                byEngineType.TryGetValue(engineType, out double sum);
-                byEngineType[engineType] = sum + item.doubleValue;
+                _engineBuckets[i].Sum += value;
+                return;
             }
+        }
 
-            double max = byEngineType.Count > 0 ? byEngineType.Values.Max() : 0;
-            return Math.Clamp(max, 0, 100);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
+        if (_engineBucketCount == _engineBuckets.Length)
+            Array.Resize(ref _engineBuckets, _engineBuckets.Length * 2);
+
+        _engineBuckets[_engineBucketCount++] = new EngineBucket { Hash = hash, Sum = value };
     }
 }

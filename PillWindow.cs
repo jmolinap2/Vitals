@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Vitals.Shared;
 using static Vitals.NativeMethods;
 
@@ -65,13 +66,16 @@ internal static class PillWindow
     private static double _fontScale = 1.0;
     private static byte _opacity = 242;
     private static nint _hwnd;
+    private static Mutex? _singleInstanceMutex;
 
     private const nint DataTimerId = 1;
     private const nint AnimTimerId = 2;
     private const int AnimFrameMs = 33;
     private const double AnimDurationMs = 350;
 
-    private static readonly MetricsSampler Sampler = new();
+    private static MetricsSampler _sampler = null!;
+    private static bool _samplerHasGpu;
+    private static bool _samplerHasNet;
     private static Snapshot _snapshot;
     private static Snapshot _animFrom;
     private static Snapshot _animTo;
@@ -110,6 +114,10 @@ internal static class PillWindow
     private static nint _critBrush;
     private static nint _labelFont;
     private static nint _valueFont;
+    // Mismas fuentes que _labelFont/_valueFont pero ya en tamaño de
+    // dispositivo (× _scale) — ver CreateFonts() y DrawDeviceText().
+    private static nint _labelFontDevice;
+    private static nint _valueFontDevice;
     private static nint _centerFormat;
     private static nint _leftFormat;
 
@@ -117,6 +125,7 @@ internal static class PillWindow
     // UpdateLayeredWindow, que respeta el alfa de cada píxel.
     private static nint _backDc;
     private static nint _backBmp;
+    private static nint _backOldBmp;
     private static nint _backBits;
     private static nint _gdipBitmap;
     private static nint _graphics;
@@ -169,6 +178,25 @@ internal static class PillWindow
         _pillHeight = _showCharts ? HeightWithCharts : HeightCompact;
     }
 
+    // Solo abre los contadores PDH (GPU / red) que realmente hacen falta —
+    // una configuración minimalista (por ejemplo, solo CPU y RAM) no debe
+    // pagar el costo de inicializar infraestructura que nunca se muestra.
+    // Si el conjunto de métricas habilitadas cambia (incluida una recarga en
+    // caliente desde Ajustes), se recrea con las banderas correctas.
+    private static void EnsureSampler()
+    {
+        bool needGpu = _enabledMetrics.Any(m => m.Key == MetricKey.Gpu);
+        bool needNet = _enabledMetrics.Any(m => m.Key is MetricKey.Up or MetricKey.Down);
+
+        if (_sampler is not null && needGpu == _samplerHasGpu && needNet == _samplerHasNet)
+            return;
+
+        _sampler?.Dispose();
+        _sampler = new MetricsSampler(needGpu, needNet);
+        _samplerHasGpu = needGpu;
+        _samplerHasNet = needNet;
+    }
+
     /// <summary>
     /// Ajustes guardó config.json y avisó por mensaje de ventana — no hay
     /// que matar el proceso: se reposiciona/redimensiona en caliente.
@@ -176,6 +204,7 @@ internal static class PillWindow
     private static void ReloadConfig()
     {
         ApplyConfig(VitalsConfig.Load());
+        EnsureSampler();
 
         int deviceWidth = (int)Math.Round(_pillWidth * _scale);
         int deviceHeight = (int)Math.Round(_pillHeight * _scale);
@@ -204,13 +233,22 @@ internal static class PillWindow
     {
         if (_labelFont != 0) Gdip.GdipDeleteFont(_labelFont);
         if (_valueFont != 0) Gdip.GdipDeleteFont(_valueFont);
+        if (_labelFontDevice != 0) Gdip.GdipDeleteFont(_labelFontDevice);
+        if (_valueFontDevice != 0) Gdip.GdipDeleteFont(_valueFontDevice);
 
+        // _labelFont/_valueFont quedan en tamaño lógico: BuildColumnLayout()
+        // los usa para medir texto sobre un HDC sin transformación, y esa
+        // medida es la que ubica íconos y rects (que sí se escalan luego con
+        // el mundo). Las variantes *Device van directo en tamaño final de
+        // píxel, para dibujar el texto nítido — ver DrawDeviceText().
         Gdip.GdipCreateFontFamilyFromName("Segoe UI", 0, out nint labelFamily);
         Gdip.GdipCreateFont(labelFamily, BaseLabelSize * (float)_fontScale, Gdip.FontStyleRegular, Gdip.UnitPixel, out _labelFont);
+        Gdip.GdipCreateFont(labelFamily, BaseLabelSize * (float)_fontScale * (float)_scale, Gdip.FontStyleRegular, Gdip.UnitPixel, out _labelFontDevice);
         Gdip.GdipDeleteFontFamily(labelFamily);
 
         Gdip.GdipCreateFontFamilyFromName("Cascadia Mono", 0, out nint valueFamily);
         Gdip.GdipCreateFont(valueFamily, BaseValueSize * (float)_fontScale, Gdip.FontStyleBold, Gdip.UnitPixel, out _valueFont);
+        Gdip.GdipCreateFont(valueFamily, BaseValueSize * (float)_fontScale * (float)_scale, Gdip.FontStyleBold, Gdip.UnitPixel, out _valueFontDevice);
         Gdip.GdipDeleteFontFamily(valueFamily);
     }
 
@@ -229,14 +267,24 @@ internal static class PillWindow
     {
         Gdip.GdipDeleteGraphics(_graphics);
         Gdip.GdipDisposeImage(_gdipBitmap);
+        // Hay que devolver el DC a su bitmap original antes de borrar el
+        // nuestro — borrar un bitmap todavía seleccionado en un DC es un uso
+        // indebido de GDI y puede filtrar el objeto.
+        SelectObject(_backDc, _backOldBmp);
         DeleteObject(_backBmp);
         DeleteDC(_backDc);
     }
 
     public static unsafe void Run()
     {
+        // Evita dos píldoras corriendo a la vez (doble clic accidental sobre
+        // el exe, arranque automático solapado con uno manual, etc.).
+        _singleInstanceMutex = new Mutex(true, "Global\\VitalsPillWindow_SingleInstance", out bool createdNew);
+        if (!createdNew) return;
+
         Gdip.Startup();
         ApplyConfig(VitalsConfig.Load());
+        EnsureSampler();
 
         nint hInstance = GetModuleHandle(null);
         var wndProcPtr = (nint)(delegate* unmanaged<nint, uint, nint, nint, nint>)&WndProc;
@@ -274,7 +322,7 @@ internal static class PillWindow
         // Sin SetWindowRgn ni SetLayeredWindowAttributes: la forma y la
         // opacidad las define ahora el alfa de la propia superficie.
         Gdip.GdipCreateSolidFill(Gdip.Argb(255, 0, 0, 0), out _bgBrush);
-        Gdip.GdipCreateSolidFill(Gdip.Argb(255, 150, 160, 168), out _labelBrush);
+        Gdip.GdipCreateSolidFill(Gdip.Argb(255, 255, 255, 255), out _labelBrush);
         Gdip.GdipCreateSolidFill(Gdip.Argb(30, 255, 255, 255), out _dividerBrush);
         Gdip.GdipCreateSolidFill(Gdip.Argb(255, 255, 193, 84), out _warnBrush);
         Gdip.GdipCreateSolidFill(Gdip.Argb(255, 255, 99, 87), out _critBrush);
@@ -297,7 +345,7 @@ internal static class PillWindow
         CreateBackBuffer(deviceWidth, deviceHeight);
         AddTrayIcon(hwnd);
 
-        _snapshot = _animFrom = _animTo = Sampler.Sample();
+        _snapshot = _animFrom = _animTo = _sampler.Sample();
         Redraw();
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetTimer(hwnd, DataTimerId, 1000, 0);
@@ -308,7 +356,39 @@ internal static class PillWindow
             DispatchMessage(ref msg);
         }
 
+        Cleanup();
+    }
+
+    // Único punto de salida del message loop ("Salir" y un WM_DESTROY del
+    // sistema terminan igual, en PostQuitMessage): todo lo que Run() abrió
+    // se libera aquí, en orden inverso a como se creó.
+    private static void Cleanup()
+    {
         Shell_NotifyIcon(NIM_DELETE, ref _trayIcon);
+
+        _sampler?.Dispose();
+
+        DisposeColumnLayout();
+        DisposeBackBuffer();
+
+        Gdip.GdipDeleteBrush(_bgBrush);
+        Gdip.GdipDeleteBrush(_labelBrush);
+        Gdip.GdipDeleteBrush(_dividerBrush);
+        Gdip.GdipDeleteBrush(_warnBrush);
+        Gdip.GdipDeleteBrush(_critBrush);
+        Gdip.GdipDeletePen(_borderPen);
+        Gdip.GdipDeleteFont(_labelFont);
+        Gdip.GdipDeleteFont(_valueFont);
+        Gdip.GdipDeleteFont(_labelFontDevice);
+        Gdip.GdipDeleteFont(_valueFontDevice);
+        Gdip.GdipDeleteStringFormat(_centerFormat);
+        Gdip.GdipDeleteStringFormat(_leftFormat);
+
+        // GdiplusShutdown debe llamarse después de liberar todo objeto GDI+
+        // creado bajo este token, nunca antes.
+        Gdip.Shutdown();
+
+        _singleInstanceMutex?.Dispose();
     }
 
     private static void BuildColumnLayout()
@@ -405,7 +485,7 @@ internal static class PillWindow
             biCompression = BI_RGB,
         };
         _backBmp = CreateDIBSection(screenDc, ref header, DIB_RGB_COLORS, out _backBits, 0, 0);
-        SelectObject(_backDc, _backBmp);
+        _backOldBmp = SelectObject(_backDc, _backBmp);
         ReleaseDC(0, screenDc);
 
         // GDI+ dibuja directamente sobre los píxeles del DIB, en premultiplicado.
@@ -465,15 +545,12 @@ internal static class PillWindow
         {
             case WM_TIMER when wParam == DataTimerId:
                 _animFrom = _snapshot;
-                _animTo = Sampler.Sample();
+                _animTo = _sampler.Sample();
                 _animStart = DateTime.UtcNow;
 
-                CpuHistory.Push(_animTo.CpuPercent);
-                GpuHistory.Push(_animTo.GpuPercent ?? 0);
-                RamHistory.Push(_animTo.RamPercent);
-                NetUpHistory.Push(_animTo.NetUpBytesPerSec);
-                NetDownHistory.Push(_animTo.NetDownBytesPerSec);
-                BatteryHistory.Push(Math.Max(_animTo.BatteryPercent, 0));
+                // Solo alimenta el historial de las columnas visibles: sin
+                // gráficas (_showCharts = false) nadie llega a leerlo.
+                if (_showCharts) PushHistory(_animTo);
 
                 // Sin transiciones: un solo repintado por lectura, en vez de
                 // los ~11 que cuesta interpolar durante 350 ms.
@@ -541,6 +618,23 @@ internal static class PillWindow
         }
     }
 
+    private static void PushHistory(Snapshot s)
+    {
+        foreach (var col in _columns)
+        {
+            double value = col.Key switch
+            {
+                MetricKey.Cpu => s.CpuPercent,
+                MetricKey.Gpu => s.GpuPercent ?? 0,
+                MetricKey.Ram => s.RamPercent,
+                MetricKey.Up => s.NetUpBytesPerSec,
+                MetricKey.Down => s.NetDownBytesPerSec,
+                _ => Math.Max(s.BatteryPercent, 0),
+            };
+            col.History.Push(value);
+        }
+    }
+
     private static void Redraw()
     {
         nint g = _graphics;
@@ -588,8 +682,7 @@ internal static class PillWindow
 
         DrawIcon(g, col.Icon, col.IconX, rowIconY, iconSize, col.Pen, col.AccentBrush);
 
-        var labelRect = col.LabelRect;
-        Gdip.GdipDrawString(g, col.Label, col.Label.Length, _labelFont, ref labelRect, _leftFormat, _labelBrush);
+        DrawDeviceText(g, col.Label, _labelFontDevice, col.LabelRect, _leftFormat, _labelBrush);
 
         if (_showCharts)
         {
@@ -601,13 +694,32 @@ internal static class PillWindow
         }
 
         string value = FormatValue(col.Key, s);
-        var valueRect = col.ValueRect;
         nint brush = _alertColors
             ? AlertLevel(col.Key, s) switch { 2 => _critBrush, 1 => _warnBrush, _ => col.TextBrush }
             : col.TextBrush;
-        Gdip.GdipDrawString(g, value, value.Length, _valueFont, ref valueRect, _centerFormat, brush);
+        DrawDeviceText(g, value, _valueFontDevice, col.ValueRect, _centerFormat, brush);
 
         Gdip.GdipResetClip(g);
+    }
+
+    // Con la transformación de escala activa, GDI+ hintea el glifo al
+    // tamaño lógico de la fuente y recién después reescala el resultado —
+    // a escalas chicas eso deja el texto borroso y con poco contraste
+    // (el trazo termina más delgado que un píxel). Acá se resetea la
+    // transformación, se dibuja con un rect y una fuente ya en tamaño de
+    // dispositivo, y se restaura la escala para lo que siga dibujándose.
+    private static void DrawDeviceText(nint g, string text, nint font, RectF logicalRect, nint format, nint brush)
+    {
+        Gdip.GdipResetWorldTransform(g);
+
+        var deviceRect = new RectF(
+            logicalRect.X * (float)_scale,
+            logicalRect.Y * (float)_scale,
+            logicalRect.Width * (float)_scale,
+            logicalRect.Height * (float)_scale);
+        Gdip.GdipDrawString(g, text, text.Length, font, ref deviceRect, format, brush);
+
+        Gdip.GdipScaleWorldTransform(g, (float)_scale, (float)_scale, Gdip.MatrixOrderPrepend);
     }
 
     /// <summary>0 = normal, 1 = aviso, 2 = crítico. La red no tiene umbral: su

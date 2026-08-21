@@ -136,6 +136,9 @@ internal static class NativeMethods
     [DllImport("pdh.dll")]
     public static extern uint PdhGetFormattedCounterArrayW(nint hCounter, uint dwFormat, ref uint lpdwBufferSize, ref uint lpdwItemCount, nint itemBuffer);
 
+    [DllImport("pdh.dll")]
+    public static extern uint PdhCloseQuery(nint hQuery);
+
     // ---- bandeja del sistema ----
 
     // Debe reflejar NOTIFYICONDATAW COMPLETA: Windows valida cbSize contra los

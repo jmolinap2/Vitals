@@ -64,6 +64,9 @@ internal static class Gdip
     [DllImport("gdiplus.dll")]
     public static extern int GdiplusStartup(out nint token, ref GdiplusStartupInput input, nint output);
 
+    [DllImport("gdiplus.dll")]
+    public static extern void GdiplusShutdown(nint token);
+
     // Formato premultiplicado: es el que exige UpdateLayeredWindow.
     public const int PixelFormat32bppPARGB = 0x000E200B;
 
@@ -99,6 +102,9 @@ internal static class Gdip
 
     [DllImport("gdiplus.dll")]
     public static extern int GdipScaleWorldTransform(nint graphics, float sx, float sy, int order);
+
+    [DllImport("gdiplus.dll")]
+    public static extern int GdipResetWorldTransform(nint graphics);
 
     [DllImport("gdiplus.dll")]
     public static extern int GdipDeleteBrush(nint brush);
@@ -167,6 +173,9 @@ internal static class Gdip
     public static extern int GdipCreateStringFormat(int formatAttributes, int language, out nint format);
 
     [DllImport("gdiplus.dll")]
+    public static extern int GdipDeleteStringFormat(nint format);
+
+    [DllImport("gdiplus.dll")]
     public static extern int GdipSetStringFormatAlign(nint format, int align);
 
     [DllImport("gdiplus.dll")]
@@ -183,10 +192,21 @@ internal static class Gdip
     public static uint Argb(byte a, byte r, byte g, byte b) =>
         ((uint)a << 24) | ((uint)r << 16) | ((uint)g << 8) | b;
 
+    private static nint _token;
+
     public static void Startup()
     {
         var input = new GdiplusStartupInput { GdiplusVersion = 1 };
-        GdiplusStartup(out _, ref input, 0);
+        GdiplusStartup(out _token, ref input, 0);
+    }
+
+    public static void Shutdown()
+    {
+        if (_token != 0)
+        {
+            GdiplusShutdown(_token);
+            _token = 0;
+        }
     }
 
     public static nint RoundRectPath(float x, float y, float w, float h, float r)
