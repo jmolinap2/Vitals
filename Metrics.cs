@@ -142,8 +142,8 @@ internal sealed class MetricsSampler : IDisposable
     {
         double bits = bytesPerSec * 8;
         return bits >= 1_000_000
-            ? $"{bits / 1_000_000:0.0} Mbps"
-            : $"{bits / 1_000:0} Kbps";
+            ? $"{bits / 1_000_000:0.0}Mbps"
+            : $"{bits / 1_000:0}Kbps";
     }
 
     private void InitCounters()

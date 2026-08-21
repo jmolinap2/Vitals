@@ -59,6 +59,15 @@ internal static class PillWindow
     private const int ScreenMargin = 12;
     private const int CornerRadius = 24;
     private const int HistoryLength = 30;
+    // Grosor mínimo del trazo de los íconos, ya en píxeles de pantalla. El
+    // pen se crea en unidades lógicas (se re-escala con el resto), así que a
+    // escalas chicas hay que engrosarlo para compensar y que no quede
+    // filiforme — ver BuildColumnLayout().
+    private const float MinIconStrokeDevicePx = 1.4f;
+    private static Corner _position = Corner.BottomRight;
+    private static bool _clickThrough;
+    private static bool _autoHideFullscreen;
+    private static bool _isHidden;
 
     private static List<MetricEntry> _enabledMetrics = [];
     private static int _pillWidth; // ancho lógico (sin escalar) — GDI+ escala todo con una sola transformación
@@ -118,6 +127,11 @@ internal static class PillWindow
     // dispositivo (× _scale) — ver CreateFonts() y DrawDeviceText().
     private static nint _labelFontDevice;
     private static nint _valueFontDevice;
+    // Subida/Bajada/Batería se dibujan con glifos reales de Segoe Fluent
+    // Icons en vez de formas dibujadas a mano — no existe un glifo dedicado
+    // para CPU/GPU/RAM en esa fuente, así que esos tres siguen siendo
+    // vectoriales (ver DrawIcon).
+    private static nint _iconFont;
     private static nint _centerFormat;
     private static nint _leftFormat;
 
@@ -159,6 +173,9 @@ internal static class PillWindow
         public nint AccentBrush;
         public nint TextBrush;
         public nint GradientBrush;
+
+        public double WarnThreshold;
+        public double CritThreshold;
     }
 
     private static ColumnLayout[] _columns = [];
@@ -167,7 +184,10 @@ internal static class PillWindow
     {
         _enabledMetrics = config.Metrics.Where(m => m.Enabled).ToList();
         if (_enabledMetrics.Count == 0) _enabledMetrics = VitalsConfig.DefaultOrder();
-        _columnWidth = Math.Clamp(config.ColumnWidth, 62, 130);
+        // El mínimo antes era 62px, pero a esa altura valores largos como
+        // "3.4Mbps" o "100%⚡" no entraban en la columna y el recorte por
+        // columna los truncaba a la mitad — de ahí el aspecto poco pulido.
+        _columnWidth = Math.Clamp(config.ColumnWidth, 78, 130);
         _pillWidth = EdgePadding * 2 + _enabledMetrics.Count * _columnWidth;
         _scale = Math.Clamp(config.Scale, 0.6, 2.0);
         _fontScale = Math.Clamp(config.FontScale, 0.7, 1.3);
@@ -176,6 +196,53 @@ internal static class PillWindow
         _showCharts = config.ShowCharts;
         _alertColors = config.AlertColors;
         _pillHeight = _showCharts ? HeightWithCharts : HeightCompact;
+        _position = config.Position;
+        _clickThrough = config.ClickThrough;
+        _autoHideFullscreen = config.AutoHideFullscreen;
+    }
+
+    // Grilla de 3x3 sobre el área de trabajo: cada eje se resuelve por
+    // separado (izquierda/centro/derecha, arriba/centro/abajo) y las 9
+    // posiciones de Corner son las combinaciones de esos dos ejes.
+    private static (int X, int Y) ComputePosition(RECT workArea, int deviceWidth, int deviceHeight)
+    {
+        int x = _position switch
+        {
+            Corner.TopLeft or Corner.Left or Corner.BottomLeft => workArea.Left + ScreenMargin,
+            Corner.Top or Corner.Center or Corner.Bottom => workArea.Left + (workArea.Width - deviceWidth) / 2,
+            _ => workArea.Right - deviceWidth - ScreenMargin,
+        };
+        int y = _position switch
+        {
+            Corner.TopLeft or Corner.Top or Corner.TopRight => workArea.Top + ScreenMargin,
+            Corner.Left or Corner.Center or Corner.Right => workArea.Top + (workArea.Height - deviceHeight) / 2,
+            _ => workArea.Bottom - deviceHeight - ScreenMargin,
+        };
+        return (x, y);
+    }
+
+    private static void ApplyClickThrough()
+    {
+        int exStyle = GetWindowLong(_hwnd, GWL_EXSTYLE);
+        exStyle = _clickThrough ? exStyle | WS_EX_TRANSPARENT : exStyle & ~WS_EX_TRANSPARENT;
+        SetWindowLong(_hwnd, GWL_EXSTYLE, exStyle);
+    }
+
+    // Compara la ventana en primer plano contra los límites completos de su
+    // monitor (no el área de trabajo, que excluye la barra de tareas): si la
+    // cubre entera, es una app a pantalla completa.
+    private static bool IsForegroundFullscreen()
+    {
+        nint fg = GetForegroundWindow();
+        if (fg == 0 || fg == _hwnd) return false;
+        if (!GetWindowRect(fg, out var winRect)) return false;
+
+        nint monitor = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        var mi = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
+        if (!GetMonitorInfo(monitor, ref mi)) return false;
+
+        return winRect.Left <= mi.rcMonitor.Left && winRect.Top <= mi.rcMonitor.Top
+            && winRect.Right >= mi.rcMonitor.Right && winRect.Bottom >= mi.rcMonitor.Bottom;
     }
 
     // Solo abre los contadores PDH (GPU / red) que realmente hacen falta —
@@ -211,9 +278,9 @@ internal static class PillWindow
 
         var workArea = new RECT();
         SystemParametersInfo(SPI_GETWORKAREA, 0, ref workArea, 0);
-        int x = workArea.Right - deviceWidth - ScreenMargin;
-        int y = workArea.Bottom - deviceHeight - ScreenMargin;
+        var (x, y) = ComputePosition(workArea, deviceWidth, deviceHeight);
         SetWindowPos(_hwnd, 0, x, y, deviceWidth, deviceHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+        ApplyClickThrough();
 
         CreateFonts();
 
@@ -228,6 +295,7 @@ internal static class PillWindow
 
     private const float BaseLabelSize = 12.5f;
     private const float BaseValueSize = 17f;
+    private const float IconGlyphSize = 17f;
 
     private static void CreateFonts()
     {
@@ -250,6 +318,11 @@ internal static class PillWindow
         Gdip.GdipCreateFont(valueFamily, BaseValueSize * (float)_fontScale, Gdip.FontStyleBold, Gdip.UnitPixel, out _valueFont);
         Gdip.GdipCreateFont(valueFamily, BaseValueSize * (float)_fontScale * (float)_scale, Gdip.FontStyleBold, Gdip.UnitPixel, out _valueFontDevice);
         Gdip.GdipDeleteFontFamily(valueFamily);
+
+        if (_iconFont != 0) Gdip.GdipDeleteFont(_iconFont);
+        Gdip.GdipCreateFontFamilyFromName("Segoe Fluent Icons", 0, out nint iconFamily);
+        Gdip.GdipCreateFont(iconFamily, IconGlyphSize * (float)_scale, Gdip.FontStyleRegular, Gdip.UnitPixel, out _iconFont);
+        Gdip.GdipDeleteFontFamily(iconFamily);
     }
 
     private static void DisposeColumnLayout()
@@ -306,8 +379,7 @@ internal static class PillWindow
 
         var workArea = new RECT();
         SystemParametersInfo(SPI_GETWORKAREA, 0, ref workArea, 0);
-        int x = workArea.Right - deviceWidth - ScreenMargin;
-        int y = workArea.Bottom - deviceHeight - ScreenMargin;
+        var (x, y) = ComputePosition(workArea, deviceWidth, deviceHeight);
 
         nint hwnd = CreateWindowEx(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -318,6 +390,7 @@ internal static class PillWindow
 
         if (hwnd == 0) return;
         _hwnd = hwnd;
+        ApplyClickThrough();
 
         // Sin SetWindowRgn ni SetLayeredWindowAttributes: la forma y la
         // opacidad las define ahora el alfa de la propia superficie.
@@ -381,6 +454,7 @@ internal static class PillWindow
         Gdip.GdipDeleteFont(_valueFont);
         Gdip.GdipDeleteFont(_labelFontDevice);
         Gdip.GdipDeleteFont(_valueFontDevice);
+        Gdip.GdipDeleteFont(_iconFont);
         Gdip.GdipDeleteStringFormat(_centerFormat);
         Gdip.GdipDeleteStringFormat(_leftFormat);
 
@@ -402,8 +476,8 @@ internal static class PillWindow
         _columns = new ColumnLayout[_enabledMetrics.Count];
         for (int i = 0; i < _enabledMetrics.Count; i++)
         {
-            var key = _enabledMetrics[i].Key;
-            var col = DescribeMetric(key);
+            var entry = _enabledMetrics[i];
+            var col = DescribeMetric(entry);
             float colStart = EdgePadding + i * _columnWidth;
 
             var probe = new RectF(0, 0, 400, 24);
@@ -417,7 +491,8 @@ internal static class PillWindow
             col.ValueRect = new RectF(colStart, _showCharts ? 78 : 33, _columnWidth, 22);
             col.DividerX = colStart;
 
-            Gdip.GdipCreatePen1(col.Accent.Stroke, 1.6f, Gdip.UnitPixel, out col.Pen);
+            float penWidth = Math.Max(1.6f, MinIconStrokeDevicePx / (float)_scale);
+            Gdip.GdipCreatePen1(col.Accent.Stroke, penWidth, Gdip.UnitPixel, out col.Pen);
             Gdip.GdipSetPenLineJoin(col.Pen, Gdip.LineJoinRound);
             Gdip.GdipSetPenStartCap(col.Pen, Gdip.LineCapRound);
             Gdip.GdipSetPenEndCap(col.Pen, Gdip.LineCapRound);
@@ -436,39 +511,75 @@ internal static class PillWindow
         ReleaseDC(0, screenDc);
     }
 
-    private static ColumnLayout DescribeMetric(MetricKey key) => key switch
+    // Valores por defecto cuando el usuario no fijó umbrales propios en
+    // Ajustes. Subida/Bajada no tienen un tope absoluto natural (no hay
+    // "100% de la red"), así que su umbral se interpreta como % de la
+    // escala dinámica de su propia gráfica — ver AlertLevel().
+    private static (double warn, double crit) DefaultThresholds(MetricKey key) => key switch
     {
-        MetricKey.Cpu => new ColumnLayout
-        {
-            Key = key, Icon = IconKind.Cpu, Label = "CPU", Accent = CpuAccent,
-            History = CpuHistory, Chart = ChartKind.Line, DynamicScale = false,
-        },
-        MetricKey.Gpu => new ColumnLayout
-        {
-            Key = key, Icon = IconKind.Gpu, Label = "GPU", Accent = GpuAccent,
-            History = GpuHistory, Chart = ChartKind.Line, DynamicScale = false,
-        },
-        MetricKey.Ram => new ColumnLayout
-        {
-            Key = key, Icon = IconKind.Ram, Label = "RAM", Accent = RamAccent,
-            History = RamHistory, Chart = ChartKind.Bars, DynamicScale = false,
-        },
-        MetricKey.Up => new ColumnLayout
-        {
-            Key = key, Icon = IconKind.Up, Label = "Subida", Accent = UpAccent,
-            History = NetUpHistory, Chart = ChartKind.Bars, DynamicScale = true,
-        },
-        MetricKey.Down => new ColumnLayout
-        {
-            Key = key, Icon = IconKind.Down, Label = "Bajada", Accent = DownAccent,
-            History = NetDownHistory, Chart = ChartKind.Bars, DynamicScale = true,
-        },
-        _ => new ColumnLayout
-        {
-            Key = MetricKey.Battery, Icon = IconKind.Battery, Label = "Batería", Accent = BatteryAccent,
-            History = BatteryHistory, Chart = ChartKind.Line, DynamicScale = false,
-        },
+        MetricKey.Cpu => (75, 90),
+        MetricKey.Gpu => (75, 90),
+        MetricKey.Ram => (80, 92),
+        MetricKey.Up => (90, 97),
+        MetricKey.Down => (90, 97),
+        _ => (20, 10), // Batería: invertido, ver AlertLevel()
     };
+
+    private static ColumnLayout DescribeMetric(MetricEntry entry)
+    {
+        var key = entry.Key;
+        var col = key switch
+        {
+            MetricKey.Cpu => new ColumnLayout
+            {
+                Key = key, Icon = IconKind.Cpu, Label = "CPU", Accent = CpuAccent,
+                History = CpuHistory, Chart = ChartKind.Line, DynamicScale = false,
+            },
+            MetricKey.Gpu => new ColumnLayout
+            {
+                Key = key, Icon = IconKind.Gpu, Label = "GPU", Accent = GpuAccent,
+                History = GpuHistory, Chart = ChartKind.Line, DynamicScale = false,
+            },
+            MetricKey.Ram => new ColumnLayout
+            {
+                Key = key, Icon = IconKind.Ram, Label = "RAM", Accent = RamAccent,
+                History = RamHistory, Chart = ChartKind.Bars, DynamicScale = false,
+            },
+            MetricKey.Up => new ColumnLayout
+            {
+                Key = key, Icon = IconKind.Up, Label = "Subida", Accent = UpAccent,
+                History = NetUpHistory, Chart = ChartKind.Bars, DynamicScale = true,
+            },
+            MetricKey.Down => new ColumnLayout
+            {
+                Key = key, Icon = IconKind.Down, Label = "Bajada", Accent = DownAccent,
+                History = NetDownHistory, Chart = ChartKind.Bars, DynamicScale = true,
+            },
+            _ => new ColumnLayout
+            {
+                Key = MetricKey.Battery, Icon = IconKind.Battery, Label = "Batería", Accent = BatteryAccent,
+                History = BatteryHistory, Chart = ChartKind.Line, DynamicScale = false,
+            },
+        };
+
+        if (TryParseHexColor(entry.Color, out byte r, out byte g, out byte b))
+            col.Accent = MakeAccent(r, g, b);
+
+        var (defWarn, defCrit) = DefaultThresholds(key);
+        col.WarnThreshold = entry.WarnThreshold ?? defWarn;
+        col.CritThreshold = entry.CritThreshold ?? defCrit;
+
+        return col;
+    }
+
+    private static bool TryParseHexColor(string? hex, out byte r, out byte g, out byte b)
+    {
+        r = g = b = 0;
+        if (hex is not { Length: 7 } || hex[0] != '#') return false;
+        return byte.TryParse(hex.AsSpan(1, 2), System.Globalization.NumberStyles.HexNumber, null, out r)
+            && byte.TryParse(hex.AsSpan(3, 2), System.Globalization.NumberStyles.HexNumber, null, out g)
+            && byte.TryParse(hex.AsSpan(5, 2), System.Globalization.NumberStyles.HexNumber, null, out b);
+    }
 
     private static void CreateBackBuffer(int width, int height)
     {
@@ -492,7 +603,7 @@ internal static class PillWindow
         Gdip.GdipCreateBitmapFromScan0(width, height, width * 4, Gdip.PixelFormat32bppPARGB, _backBits, out _gdipBitmap);
         Gdip.GdipGetImageGraphicsContext(_gdipBitmap, out _graphics);
         Gdip.GdipSetSmoothingMode(_graphics, Gdip.SmoothingModeAntiAlias);
-        Gdip.GdipSetTextRenderingHint(_graphics, Gdip.TextRenderingHintAntiAlias);
+        Gdip.GdipSetTextRenderingHint(_graphics, Gdip.TextRenderingHintAntiAliasGridFit);
         Gdip.GdipScaleWorldTransform(_graphics, (float)_scale, (float)_scale, Gdip.MatrixOrderPrepend);
 
         _backWidth = width;
@@ -544,6 +655,23 @@ internal static class PillWindow
         switch (msg)
         {
             case WM_TIMER when wParam == DataTimerId:
+                if (_autoHideFullscreen)
+                {
+                    bool shouldHide = IsForegroundFullscreen();
+                    if (shouldHide != _isHidden)
+                    {
+                        _isHidden = shouldHide;
+                        ShowWindow(hWnd, shouldHide ? SW_HIDE : SW_SHOWNOACTIVATE);
+                    }
+                }
+                else if (_isHidden)
+                {
+                    // Se apagó la opción mientras estaba oculta por una app a
+                    // pantalla completa — hay que volver a mostrarla.
+                    _isHidden = false;
+                    ShowWindow(hWnd, SW_SHOWNOACTIVATE);
+                }
+
                 _animFrom = _snapshot;
                 _animTo = _sampler.Sample();
                 _animStart = DateTime.UtcNow;
@@ -680,7 +808,7 @@ internal static class PillWindow
         // sin esto se dibujan encima de la columna vecina.
         Gdip.GdipSetClipRect(g, col.DividerX, 0, _columnWidth, _pillHeight, Gdip.CombineModeReplace);
 
-        DrawIcon(g, col.Icon, col.IconX, rowIconY, iconSize, col.Pen, col.AccentBrush);
+        DrawIcon(g, col, col.IconX, rowIconY, iconSize, s);
 
         DrawDeviceText(g, col.Label, _labelFontDevice, col.LabelRect, _leftFormat, _labelBrush);
 
@@ -695,7 +823,7 @@ internal static class PillWindow
 
         string value = FormatValue(col.Key, s);
         nint brush = _alertColors
-            ? AlertLevel(col.Key, s) switch { 2 => _critBrush, 1 => _warnBrush, _ => col.TextBrush }
+            ? AlertLevel(col, s) switch { 2 => _critBrush, 1 => _warnBrush, _ => col.TextBrush }
             : col.TextBrush;
         DrawDeviceText(g, value, _valueFontDevice, col.ValueRect, _centerFormat, brush);
 
@@ -722,21 +850,36 @@ internal static class PillWindow
         Gdip.GdipScaleWorldTransform(g, (float)_scale, (float)_scale, Gdip.MatrixOrderPrepend);
     }
 
-    /// <summary>0 = normal, 1 = aviso, 2 = crítico. La red no tiene umbral: su
-    /// valor "alto" es deseable, no un problema.</summary>
-    private static int AlertLevel(MetricKey key, Snapshot s) => key switch
+    /// <summary>0 = normal, 1 = aviso, 2 = crítico.</summary>
+    private static int AlertLevel(ColumnLayout col, Snapshot s)
     {
-        MetricKey.Cpu => Level(s.CpuPercent, 75, 90),
-        MetricKey.Gpu => s.GpuPercent is { } g ? Level(g, 75, 90) : 0,
-        MetricKey.Ram => Level(s.RamPercent, 80, 92),
-        // Batería al revés: alarma cuando queda poca, y solo con el cargador
-        // desconectado — enchufado, un 8% es normal, no una alerta.
-        MetricKey.Battery => s.OnAc || s.BatteryPercent < 0 ? 0
-            : s.BatteryPercent <= 10 ? 2
-            : s.BatteryPercent <= 20 ? 1
-            : 0,
-        _ => 0,
-    };
+        if (col.Key == MetricKey.Battery)
+        {
+            // Al revés: alarma cuando queda poca, y solo con el cargador
+            // desconectado — enchufado, un 8% es normal, no una alerta.
+            if (s.OnAc || s.BatteryPercent < 0) return 0;
+            return s.BatteryPercent <= col.CritThreshold ? 2
+                : s.BatteryPercent <= col.WarnThreshold ? 1
+                : 0;
+        }
+
+        double? value = col.Key switch
+        {
+            MetricKey.Cpu => s.CpuPercent,
+            MetricKey.Gpu => s.GpuPercent,
+            MetricKey.Ram => s.RamPercent,
+            // Sin tope absoluto natural: se compara contra la misma escala
+            // dinámica que usa la gráfica (máximo reciente, mínimo 20 KB/s).
+            MetricKey.Up => PercentOfDynamicScale(s.NetUpBytesPerSec, col),
+            MetricKey.Down => PercentOfDynamicScale(s.NetDownBytesPerSec, col),
+            _ => null,
+        };
+
+        return value is { } v ? Level(v, col.WarnThreshold, col.CritThreshold) : 0;
+    }
+
+    private static double PercentOfDynamicScale(double value, ColumnLayout col) =>
+        value / Math.Max(col.History.Max(), 20_000) * 100;
 
     private static int Level(double value, double warn, double crit) =>
         value >= crit ? 2 : value >= warn ? 1 : 0;
@@ -751,27 +894,40 @@ internal static class PillWindow
         _ => s.BatteryPercent < 0 ? "—" : $"{s.BatteryPercent}%{(s.OnAc ? " ⚡" : "")}",
     };
 
-    private static void DrawIcon(nint g, IconKind kind, float x, float y, float size, nint pen, nint fillBrush)
+    // Glifos de Segoe Fluent Icons construidos por código de punto, nunca
+    // tipeados como caracteres literales: son de Área de Uso Privado (no
+    // tienen representación visible propia) y se corrompen fácilmente al
+    // pasar por texto/portapapeles.
+    private static readonly string UploadGlyph = ((char)0xE898).ToString();
+    private static readonly string DownloadGlyph = ((char)0xE896).ToString();
+    private static readonly string BatteryUnknownGlyph = ((char)0xE996).ToString();
+    private static readonly string BatteryFullGlyph = ((char)0xE83F).ToString();
+
+    private static void DrawIcon(nint g, ColumnLayout col, float x, float y, float size, Snapshot s)
     {
-        switch (kind)
+        nint pen = col.Pen;
+        switch (col.Icon)
         {
             case IconKind.Cpu:
             case IconKind.Gpu:
             {
                 float pad = size * 0.22f;
                 float bx = x + pad, by = y + pad, bs = size - pad * 2;
-                Gdip.GdipDrawRectangle(g, pen, bx, by, bs, bs);
+                float r = bs * 0.2f;
+                nint chip = Gdip.RoundRectPath(bx, by, bs, bs, r);
+                Gdip.GdipDrawPath(g, pen, chip);
+                Gdip.GdipDeletePath(chip);
                 for (int i = 0; i < 3; i++)
                 {
                     float px = bx + bs * (i + 1) / 4f;
                     Gdip.GdipDrawLine(g, pen, px, y, px, by);
                     Gdip.GdipDrawLine(g, pen, px, by + bs, px, y + size);
                 }
-                if (kind == IconKind.Gpu)
+                if (col.Icon == IconKind.Gpu)
                 {
-                    float cx = bx + bs / 2, cy = by + bs / 2, r = bs * 0.24f;
+                    float cx = bx + bs / 2, cy = by + bs / 2, cr = bs * 0.24f;
                     Gdip.GdipCreatePath(Gdip.FillModeAlternate, out nint circle);
-                    Gdip.GdipAddPathArc(circle, cx - r, cy - r, r * 2, r * 2, 0, 360);
+                    Gdip.GdipAddPathArc(circle, cx - cr, cy - cr, cr * 2, cr * 2, 0, 360);
                     Gdip.GdipDrawPath(g, pen, circle);
                     Gdip.GdipDeletePath(circle);
                 }
@@ -781,7 +937,10 @@ internal static class PillWindow
             {
                 float bodyH = size * 0.55f;
                 float by = y + size * 0.1f;
-                Gdip.GdipDrawRectangle(g, pen, x, by, size, bodyH);
+                float r = bodyH * 0.22f;
+                nint body = Gdip.RoundRectPath(x, by, size, bodyH, r);
+                Gdip.GdipDrawPath(g, pen, body);
+                Gdip.GdipDeletePath(body);
                 float pinY = by + bodyH;
                 for (int i = 0; i < 4; i++)
                 {
@@ -791,28 +950,44 @@ internal static class PillWindow
                 break;
             }
             case IconKind.Up:
+                DrawIconGlyph(g, UploadGlyph, x, y, size, col.AccentBrush);
+                break;
             case IconKind.Down:
-            {
-                float cx = x + size / 2;
-                bool up = kind == IconKind.Up;
-                float tip = up ? y : y + size;
-                float dir = up ? 1 : -1;
-                float arm = size * 0.34f;
-                Gdip.GdipDrawLine(g, pen, cx, y, cx, y + size);
-                Gdip.GdipDrawLine(g, pen, cx, tip, cx - arm, tip + arm * dir);
-                Gdip.GdipDrawLine(g, pen, cx, tip, cx + arm, tip + arm * dir);
+                DrawIconGlyph(g, DownloadGlyph, x, y, size, col.AccentBrush);
                 break;
-            }
             case IconKind.Battery:
-            {
-                float bodyW = size * 0.78f, bodyH = size * 0.5f;
-                float bx = x, by = y + (size - bodyH) / 2;
-                Gdip.GdipDrawRectangle(g, pen, bx, by, bodyW, bodyH);
-                float nubW = size * 0.1f, nubH = bodyH * 0.4f;
-                Gdip.GdipFillRectangle(g, fillBrush, bx + bodyW, by + (bodyH - nubH) / 2, nubW, nubH);
+                DrawIconGlyph(g, BatteryGlyph(s.BatteryPercent, s.OnAc), x, y, size, col.AccentBrush);
                 break;
-            }
         }
+    }
+
+    // Glifos reales de Segoe Fluent Icons en vez de formas dibujadas a mano
+    // — se dibujan igual que el texto (ver DrawDeviceText): transformación
+    // reseteada y rect/fuente ya en tamaño de dispositivo, para que salgan
+    // tan nítidos como el resto del texto.
+    private static void DrawIconGlyph(nint g, string glyph, float x, float y, float size, nint brush)
+    {
+        Gdip.GdipResetWorldTransform(g);
+
+        var deviceRect = new RectF(x * (float)_scale, y * (float)_scale, size * (float)_scale, size * (float)_scale);
+        Gdip.GdipDrawString(g, glyph, glyph.Length, _iconFont, ref deviceRect, _centerFormat, brush);
+
+        Gdip.GdipScaleWorldTransform(g, (float)_scale, (float)_scale, Gdip.MatrixOrderPrepend);
+    }
+
+    // Battery0-9 + Battery10 cubren 11 tramos de carga; BatteryCharging0-8,
+    // 9 tramos mientras está enchufada — así el ícono refleja el nivel real
+    // en vez de ser siempre el mismo dibujo fijo.
+    private static string BatteryGlyph(int percent, bool onAc)
+    {
+        if (percent < 0) return BatteryUnknownGlyph;
+        if (onAc)
+        {
+            int level = Math.Clamp((int)Math.Round(percent / 100.0 * 8), 0, 8);
+            return ((char)(0xE85A + level)).ToString();
+        }
+        int lvl = Math.Clamp((int)Math.Round(percent / 100.0 * 10), 0, 10);
+        return lvl == 10 ? BatteryFullGlyph : ((char)(0xE850 + lvl)).ToString();
     }
 
     // Compartidos entre CPU y GPU: un mismo pase de render consume cada

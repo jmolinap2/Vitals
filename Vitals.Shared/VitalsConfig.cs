@@ -5,10 +5,27 @@ namespace Vitals.Shared;
 
 public enum MetricKey { Cpu, Gpu, Ram, Up, Down, Battery }
 
+/// <summary>Las 9 combinaciones de una grilla de 3x3 en el área de trabajo.</summary>
+public enum Corner
+{
+    TopLeft, Top, TopRight,
+    Left, Center, Right,
+    BottomLeft, Bottom, BottomRight,
+}
+
 public sealed class MetricEntry
 {
     public MetricKey Key { get; set; }
     public bool Enabled { get; set; } = true;
+
+    /// <summary>Color de acento en hex "#RRGGBB". Null = color por defecto de la métrica.</summary>
+    public string? Color { get; set; }
+
+    /// <summary>Umbral de aviso (ámbar), 0-100. Null = valor por defecto de la métrica.</summary>
+    public double? WarnThreshold { get; set; }
+
+    /// <summary>Umbral crítico (rojo), 0-100. Null = valor por defecto de la métrica.</summary>
+    public double? CritThreshold { get; set; }
 }
 
 public sealed class VitalsConfig
@@ -31,6 +48,18 @@ public sealed class VitalsConfig
 
     /// <summary>Multiplicador sobre el tamaño base de etiquetas y valores — independiente de Scale.</summary>
     public double FontScale { get; set; } = 1.0;
+
+    /// <summary>Posición en la grilla de 3x3 del área de trabajo donde vive la píldora.</summary>
+    public Corner Position { get; set; } = Corner.BottomRight;
+
+    /// <summary>Se agrega a la carpeta de inicio de Windows del usuario actual.</summary>
+    public bool AutoStart { get; set; }
+
+    /// <summary>Oculta la píldora mientras la ventana en primer plano ocupa toda la pantalla.</summary>
+    public bool AutoHideFullscreen { get; set; }
+
+    /// <summary>Los clics atraviesan la píldora hacia la ventana debajo (WS_EX_TRANSPARENT).</summary>
+    public bool ClickThrough { get; set; }
 
     public static List<MetricEntry> DefaultOrder() =>
     [
