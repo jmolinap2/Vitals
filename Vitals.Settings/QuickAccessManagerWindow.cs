@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -27,16 +26,15 @@ internal sealed class QuickAccessManagerWindow : Window
     public QuickAccessManagerWindow()
     {
         Title = "Accesos rápidos de Vitals";
-        Width = 820;
+        Width = 840;
         Height = 590;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         ResizeMode = ResizeMode.NoResize;
         Background = BackgroundBrush;
         Foreground = TextBrush;
 
-        var config = VitalsConfig.Load();
         _items = new ObservableCollection<QuickAccessItem>(
-            config.QuickAccess.OrderBy(x => x.Order).Select(Clone));
+            QuickAccessStore.Load().OrderBy(x => x.Order).Select(Clone));
 
         var root = new Grid { Margin = new Thickness(26, 22, 26, 20) };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -47,37 +45,25 @@ internal sealed class QuickAccessManagerWindow : Window
         var header = new Grid { Margin = new Thickness(0, 0, 0, 18) };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        Grid.SetRow(header, 0);
         root.Children.Add(header);
 
-        var title = new StackPanel();
-        title.Children.Add(new TextBlock
+        var heading = new StackPanel();
+        heading.Children.Add(new TextBlock { Text = "Accesos rápidos", FontSize = 22, FontWeight = FontWeights.SemiBold, Foreground = TextBrush });
+        heading.Children.Add(new TextBlock
         {
-            Text = "Accesos rápidos",
-            FontSize = 22,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = TextBrush,
-        });
-        title.Children.Add(new TextBlock
-        {
-            Text = "Agrega programas, archivos, carpetas, URLs o scripts al menú de la bandeja de Vitals.",
+            Text = "Programas, archivos, carpetas, URLs y scripts disponibles desde la bandeja de Vitals.",
             FontSize = 12.5,
             Foreground = MutedBrush,
             Margin = new Thickness(0, 4, 0, 0),
         });
-        header.Children.Add(title);
+        header.Children.Add(heading);
 
-        var addButton = CreateButton("+  Agregar acceso", primary: true);
-        addButton.Click += (_, _) => AddItem();
-        Grid.SetColumn(addButton, 1);
-        header.Children.Add(addButton);
+        var add = CreateButton("+  Agregar acceso", true);
+        add.Click += (_, _) => AddItem();
+        Grid.SetColumn(add, 1);
+        header.Children.Add(add);
 
-        var card = new Border
-        {
-            Background = CardBrush,
-            CornerRadius = new CornerRadius(10),
-            Padding = new Thickness(14),
-        };
+        var card = new Border { Background = CardBrush, CornerRadius = new CornerRadius(10), Padding = new Thickness(14) };
         Grid.SetRow(card, 1);
         root.Children.Add(card);
 
@@ -91,9 +77,9 @@ internal sealed class QuickAccessManagerWindow : Window
             Foreground = TextBrush,
             ItemsSource = _items,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            ItemTemplate = BuildItemTemplate(),
         };
         _list.MouseDoubleClick += (_, _) => EditSelected();
-        _list.ItemTemplate = BuildItemTemplate();
         cardGrid.Children.Add(_list);
 
         _emptyState = new TextBlock
@@ -114,61 +100,43 @@ internal sealed class QuickAccessManagerWindow : Window
         Grid.SetRow(footer, 2);
         root.Children.Add(footer);
 
-        footer.Children.Add(new TextBlock
-        {
-            Text = "Los cambios se aplican al guardar y Vitals recarga el menú sin reiniciarse.",
-            Foreground = MutedBrush,
-            FontSize = 11.5,
-            VerticalAlignment = VerticalAlignment.Center,
-        });
+        var itemActions = new StackPanel { Orientation = Orientation.Horizontal };
+        footer.Children.Add(itemActions);
+        AddAction(itemActions, "Editar", (_, _) => EditSelected());
+        AddAction(itemActions, "Eliminar", (_, _) => RemoveSelected());
+        AddAction(itemActions, "↑", (_, _) => MoveSelected(-1));
+        AddAction(itemActions, "↓", (_, _) => MoveSelected(1));
 
-        var actions = new StackPanel { Orientation = Orientation.Horizontal };
-        Grid.SetColumn(actions, 1);
-        footer.Children.Add(actions);
+        var windowActions = new StackPanel { Orientation = Orientation.Horizontal };
+        Grid.SetColumn(windowActions, 1);
+        footer.Children.Add(windowActions);
 
-        var closeButton = CreateButton("Cancelar", primary: false);
-        closeButton.Margin = new Thickness(0, 0, 10, 0);
-        closeButton.Click += (_, _) => Close();
-        actions.Children.Add(closeButton);
+        var cancel = CreateButton("Cancelar", false);
+        cancel.Margin = new Thickness(0, 0, 10, 0);
+        cancel.Click += (_, _) => Close();
+        windowActions.Children.Add(cancel);
 
-        var saveButton = CreateButton("Guardar cambios", primary: true);
-        saveButton.Click += (_, _) => SaveAndClose();
-        actions.Children.Add(saveButton);
+        var save = CreateButton("Guardar cambios", true);
+        save.Click += (_, _) => SaveAndClose();
+        windowActions.Children.Add(save);
     }
 
-    private DataTemplate BuildItemTemplate()
+    private static DataTemplate BuildItemTemplate()
     {
         var template = new DataTemplate(typeof(QuickAccessItem));
-
         var border = new FrameworkElementFactory(typeof(Border));
         border.SetValue(Border.BackgroundProperty, RowBrush);
         border.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
-        border.SetValue(Border.PaddingProperty, new Thickness(12, 10, 10, 10));
+        border.SetValue(Border.PaddingProperty, new Thickness(12, 9, 12, 9));
         border.SetValue(Border.MarginProperty, new Thickness(0, 0, 0, 7));
 
-        var grid = new FrameworkElementFactory(typeof(Grid));
-        grid.AppendChild(Column("Auto"));
-        grid.AppendChild(Column("*"));
-        grid.AppendChild(Column("Auto"));
-        border.AppendChild(grid);
-
-        var icon = new FrameworkElementFactory(typeof(TextBlock));
-        icon.SetValue(TextBlock.TextProperty, "↗");
-        icon.SetValue(TextBlock.FontSizeProperty, 19d);
-        icon.SetValue(TextBlock.ForegroundProperty, AccentBrush);
-        icon.SetValue(FrameworkElement.WidthProperty, 34d);
-        icon.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-        grid.AppendChild(icon);
-
-        var info = new FrameworkElementFactory(typeof(StackPanel));
-        info.SetValue(Grid.ColumnProperty, 1);
-
+        var panel = new FrameworkElementFactory(typeof(StackPanel));
         var name = new FrameworkElementFactory(typeof(TextBlock));
         name.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding(nameof(QuickAccessItem.Name)));
         name.SetValue(TextBlock.ForegroundProperty, TextBrush);
         name.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
         name.SetValue(TextBlock.FontSizeProperty, 13.5d);
-        info.AppendChild(name);
+        panel.AppendChild(name);
 
         var target = new FrameworkElementFactory(typeof(TextBlock));
         target.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding(nameof(QuickAccessItem.Target)));
@@ -176,29 +144,19 @@ internal sealed class QuickAccessManagerWindow : Window
         target.SetValue(TextBlock.FontSizeProperty, 11d);
         target.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
         target.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 3, 0, 0));
-        info.AppendChild(target);
-        grid.AppendChild(info);
+        panel.AppendChild(target);
 
-        var enabled = new FrameworkElementFactory(typeof(CheckBox));
-        enabled.SetBinding(System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty,
-            new System.Windows.Data.Binding(nameof(QuickAccessItem.Enabled)) { Mode = System.Windows.Data.BindingMode.TwoWay });
-        enabled.SetValue(Grid.ColumnProperty, 2);
-        enabled.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-        enabled.SetValue(FrameworkElement.MarginProperty, new Thickness(16, 0, 4, 0));
-        enabled.SetValue(ContentControl.ContentProperty, "Activo");
-        enabled.SetValue(Control.ForegroundProperty, MutedBrush);
-        grid.AppendChild(enabled);
-
+        border.AppendChild(panel);
         template.VisualTree = border;
         return template;
     }
 
-    private static FrameworkElementFactory Column(string width)
+    private static void AddAction(Panel parent, string text, RoutedEventHandler handler)
     {
-        var c = new FrameworkElementFactory(typeof(ColumnDefinition));
-        c.SetValue(ColumnDefinition.WidthProperty,
-            width == "*" ? new GridLength(1, GridUnitType.Star) : GridLength.Auto);
-        return c;
+        var button = CreateButton(text, false);
+        button.Margin = new Thickness(0, 0, 8, 0);
+        button.Click += handler;
+        parent.Children.Add(button);
     }
 
     private void AddItem()
@@ -223,16 +181,33 @@ internal sealed class QuickAccessManagerWindow : Window
         _list.SelectedIndex = index;
     }
 
+    private void RemoveSelected()
+    {
+        if (_list.SelectedItem is not QuickAccessItem selected) return;
+        if (MessageBox.Show(this, $"¿Eliminar '{selected.Name}'?", "Vitals", MessageBoxButton.YesNo,
+                MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        _items.Remove(selected);
+        RefreshEmptyState();
+    }
+
+    private void MoveSelected(int delta)
+    {
+        if (_list.SelectedItem is not QuickAccessItem selected) return;
+        int from = _items.IndexOf(selected);
+        int to = from + delta;
+        if (to < 0 || to >= _items.Count) return;
+        _items.Move(from, to);
+        _list.SelectedIndex = to;
+    }
+
     private void SaveAndClose()
     {
-        var config = VitalsConfig.Load();
-        config.QuickAccess = _items.Select((item, index) =>
+        QuickAccessStore.Save(_items.Select((item, index) =>
         {
             var copy = Clone(item);
             copy.Order = index;
             return copy;
-        }).ToList();
-        config.Save();
+        }));
 
         nint hwnd = NativeInterop.FindWindow("VitalsPillWindow", null);
         if (hwnd != 0)
@@ -241,8 +216,7 @@ internal sealed class QuickAccessManagerWindow : Window
         DialogResult = true;
     }
 
-    private void RefreshEmptyState() =>
-        _emptyState.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    private void RefreshEmptyState() => _emptyState.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
     private static QuickAccessItem Clone(QuickAccessItem item) => new()
     {
@@ -257,25 +231,20 @@ internal sealed class QuickAccessManagerWindow : Window
         Order = item.Order,
     };
 
-    private static Button CreateButton(string text, bool primary)
+    private static Button CreateButton(string text, bool primary) => new()
     {
-        var button = new Button
-        {
-            Content = text,
-            Padding = new Thickness(16, 9, 16, 9),
-            Cursor = Cursors.Hand,
-            FontSize = 13,
-            FontWeight = primary ? FontWeights.SemiBold : FontWeights.Normal,
-            Foreground = primary ? BrushFrom("#04211D") : MutedBrush,
-            Background = primary ? AccentBrush : Brushes.Transparent,
-            BorderBrush = primary ? AccentBrush : BorderBrush,
-            BorderThickness = new Thickness(1),
-        };
-        return button;
-    }
+        Content = text,
+        Padding = new Thickness(16, 9, 16, 9),
+        Cursor = Cursors.Hand,
+        FontSize = 13,
+        FontWeight = primary ? FontWeights.SemiBold : FontWeights.Normal,
+        Foreground = primary ? BrushFrom("#04211D") : MutedBrush,
+        Background = primary ? AccentBrush : Brushes.Transparent,
+        BorderBrush = primary ? AccentBrush : BorderBrush,
+        BorderThickness = new Thickness(1),
+    };
 
-    private static Brush BrushFrom(string hex) =>
-        new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
+    private static Brush BrushFrom(string hex) => new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
 }
 
 internal sealed class QuickAccessEditorWindow : Window
@@ -322,17 +291,14 @@ internal sealed class QuickAccessEditorWindow : Window
         root.Children.Add(form);
 
         _name = AddField(form, "Nombre", source?.Name ?? string.Empty, "Ej.: Conectar VPN");
-
-        var targetRow = AddFieldWithButton(form, "Destino", source?.Target ?? string.Empty, "Seleccionar...", SelectTarget);
-        _target = targetRow;
+        _target = AddFieldWithButton(form, "Destino", source?.Target ?? string.Empty, "Seleccionar archivo...", SelectTarget);
         _arguments = AddField(form, "Argumentos (opcional)", source?.Arguments ?? string.Empty, "Ej.: --profile Producción");
         _workingDirectory = AddField(form, "Directorio de trabajo (opcional)", source?.WorkingDirectory ?? string.Empty, string.Empty);
 
-        var modeLabel = Label("Icono");
-        form.Children.Add(modeLabel);
+        form.Children.Add(Label("Icono"));
         _iconMode = new ComboBox
         {
-            ItemsSource = new[] { "Automático", "Personalizado" },
+            ItemsSource = new[] { "Automático (del archivo o programa)", "Personalizado" },
             SelectedIndex = source?.IconMode == QuickAccessIconMode.Custom ? 1 : 0,
             Margin = new Thickness(0, 0, 0, 10),
             Padding = new Thickness(8, 6, 8, 6),
@@ -352,12 +318,7 @@ internal sealed class QuickAccessEditorWindow : Window
         };
         form.Children.Add(_enabled);
 
-        var footer = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(0, 14, 0, 0),
-        };
+        var footer = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 14, 0, 0) };
         Grid.SetRow(footer, 2);
         root.Children.Add(footer);
 
@@ -402,14 +363,11 @@ internal sealed class QuickAccessEditorWindow : Window
             Title = "Seleccionar programa, archivo o script",
             Filter = "Todos los archivos|*.*|Programas|*.exe|Scripts|*.bat;*.cmd;*.ps1",
         };
-        if (dialog.ShowDialog(this) == true)
-        {
-            _target.Text = dialog.FileName;
-            if (string.IsNullOrWhiteSpace(_name.Text))
-                _name.Text = Path.GetFileNameWithoutExtension(dialog.FileName);
-            if (string.IsNullOrWhiteSpace(_workingDirectory.Text))
-                _workingDirectory.Text = Path.GetDirectoryName(dialog.FileName) ?? string.Empty;
-        }
+        if (dialog.ShowDialog(this) != true) return;
+
+        _target.Text = dialog.FileName;
+        if (string.IsNullOrWhiteSpace(_name.Text)) _name.Text = Path.GetFileNameWithoutExtension(dialog.FileName);
+        if (string.IsNullOrWhiteSpace(_workingDirectory.Text)) _workingDirectory.Text = Path.GetDirectoryName(dialog.FileName) ?? string.Empty;
     }
 
     private void SelectIcon()
@@ -417,10 +375,9 @@ internal sealed class QuickAccessEditorWindow : Window
         var dialog = new OpenFileDialog
         {
             Title = "Seleccionar icono",
-            Filter = "Iconos e imágenes|*.ico;*.png;*.jpg;*.jpeg;*.exe|Todos los archivos|*.*",
+            Filter = "Iconos y ejecutables|*.ico;*.exe;*.dll|Todos los archivos|*.*",
         };
-        if (dialog.ShowDialog(this) == true)
-            _iconPath.Text = dialog.FileName;
+        if (dialog.ShowDialog(this) == true) _iconPath.Text = dialog.FileName;
     }
 
     private static TextBox AddField(Panel parent, string label, string value, string tooltip)
@@ -484,9 +441,6 @@ internal sealed class QuickAccessEditorWindow : Window
         BorderThickness = new Thickness(1),
     };
 
-    private static string? NullIfWhiteSpace(string value) =>
-        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-
-    private static Brush BrushFrom(string hex) =>
-        new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
+    private static string? NullIfWhiteSpace(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private static Brush BrushFrom(string hex) => new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
 }
