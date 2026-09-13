@@ -14,7 +14,6 @@ internal static class QuickAccessIntegration
 {
     private const int WhCallWndProc = 4;
     private const uint WmInitMenuPopup = 0x0117;
-    private const uint WmUninitMenuPopup = 0x0125;
     private const uint MfByPosition = 0x0400;
     private const uint MfPopup = 0x0010;
     private const uint MfSeparator = 0x0800;
@@ -77,16 +76,22 @@ internal static class QuickAccessIntegration
     [UnmanagedCallersOnly]
     private static nint HookProc(int nCode, nint wParam, nint lParam)
     {
-        if (nCode >= 0 && lParam != 0)
+        try
         {
-            var message = Marshal.PtrToStructure<CWPSTRUCT>(lParam);
+            if (nCode >= 0 && lParam != 0)
+            {
+                var message = Marshal.PtrToStructure<CWPSTRUCT>(lParam);
 
-            if (message.message == WmInitMenuPopup)
-                TryPopulateRootMenu(message.wParam);
-            else if (message.message == WM_COMMAND)
-                TryLaunchCommand(message.hwnd, message.wParam);
-            else if (message.message == WmUninitMenuPopup)
-                CleanupMenuBitmaps();
+                if (message.message == WmInitMenuPopup)
+                    TryPopulateRootMenu(message.wParam);
+                else if (message.message == WM_COMMAND)
+                    TryLaunchCommand(message.hwnd, message.wParam);
+            }
+        }
+        catch
+        {
+            // Nunca debe salir una excepción a través de un callback Win32.
+            // Un quick-access corrupto no puede tumbar el monitor.
         }
 
         return CallNextHookEx(_hook, nCode, wParam, lParam);
@@ -139,8 +144,7 @@ internal static class QuickAccessIntegration
         var item = _activeItems[index];
         try
         {
-            var startInfo = BuildStartInfo(item);
-            Process.Start(startInfo);
+            Process.Start(BuildStartInfo(item));
         }
         catch (Exception ex)
         {
