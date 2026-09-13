@@ -5,34 +5,39 @@ using Vitals.Shared;
 namespace Vitals;
 
 /// <summary>
-/// Launcher visual acoplado a la cápsula. Mantiene su propia ventana Win32 para
-/// no mezclar el render de métricas con el grid de accesos directos.
+/// Launcher visual acoplado a la cápsula. El panel vive en su propia ventana
+/// Win32, pero se comporta y se dibuja como un drawer de la cápsula.
 /// </summary>
 internal static unsafe class CapsuleQuickLauncher
 {
     private const string ToggleClass = "VitalsLauncherToggle";
     private const string PanelClass = "VitalsLauncherPanel";
-    private const int ToggleSize = 28;
-    private const int Gap = 5;
-    private const int CellWidth = 92;
-    private const int CellHeightLabels = 76;
-    private const int CellHeightCompact = 56;
-    private const int Padding = 10;
+
+    private const int ToggleWidth = 24;
+    private const int ToggleHeight = 20;
+    private const int ToggleOverlap = 5;
+    private const int PanelGap = 3;
+    private const int CellWidth = 88;
+    private const int PanelPadding = 10;
+    private const int ItemInset = 4;
+    private const int PanelRadius = 18;
+
     private const nint AnimationTimer = 31;
     private const uint WM_PAINT = 0x000F;
     private const uint WM_LBUTTONUP = 0x0202;
     private const uint WM_MOUSEMOVE = 0x0200;
+    private const uint WM_MOUSELEAVE = 0x02A3;
     private const uint WM_TIMER = 0x0113;
     private const uint WM_DESTROY = 0x0002;
     private const uint WS_POPUP = 0x80000000;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WS_EX_TOPMOST = 0x00000008;
+    private const int WS_EX_LAYERED = 0x00080000;
     private const int WS_EX_NOACTIVATE = 0x08000000;
     private const int SW_HIDE = 0;
     private const int SW_SHOWNOACTIVATE = 4;
     private const uint SWP_NOACTIVATE = 0x0010;
     private const uint SWP_NOZORDER = 0x0004;
-    private const int COLOR_WINDOW = 5;
     private const uint DT_CENTER = 0x00000001;
     private const uint DT_VCENTER = 0x00000004;
     private const uint DT_SINGLELINE = 0x00000020;
@@ -41,6 +46,17 @@ internal static unsafe class CapsuleQuickLauncher
     private const uint SHGFI_LARGEICON = 0x000000000;
     private const int DI_NORMAL = 0x0003;
     private const int TRANSPARENT = 1;
+    private const uint LWA_ALPHA = 0x00000002;
+    private const uint TME_LEAVE = 0x00000002;
+    private const int DEFAULT_GUI_FONT = 17;
+    private const int NULL_PEN = 8;
+    private const int PS_SOLID = 0;
+
+    private static readonly uint Background = Rgb(7, 9, 12);
+    private static readonly uint Border = Rgb(48, 54, 64);
+    private static readonly uint Hover = Rgb(27, 32, 39);
+    private static readonly uint Text = Rgb(236, 240, 244);
+    private static readonly uint Accent = Rgb(42, 209, 190);
 
     private static nint _pill;
     private static nint _toggle;
@@ -49,12 +65,15 @@ internal static unsafe class CapsuleQuickLauncher
     private static bool _registered;
     private static bool _expanded;
     private static bool _opening;
+    private static bool _trackingMouse;
     private static DateTime _animationStart;
     private static int _panelX;
     private static int _panelY;
     private static int _panelWidth;
     private static int _panelHeight;
     private static bool _opensUp;
+    private static int _hoverIndex = -1;
+    private static double _animationFactor;
     private static QuickLauncherConfig _config = new();
     private static List<QuickAccessItem> _items = [];
     private static readonly List<nint> Icons = [];
@@ -82,6 +101,8 @@ internal static unsafe class CapsuleQuickLauncher
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct SHFILEINFO { public nint hIcon; public int iIcon; public uint dwAttributes; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szDisplayName; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName; }
     [StructLayout(LayoutKind.Sequential)] private struct MONITORINFO { public uint cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TRACKMOUSEEVENT { public uint cbSize; public uint dwFlags; public nint hwndTrack; public uint dwHoverTime; }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern nint GetModuleHandle(string? name);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern ushort RegisterClassEx(ref WNDCLASSEX cls);
@@ -90,24 +111,34 @@ internal static unsafe class CapsuleQuickLauncher
     [DllImport("user32.dll")] private static extern bool ShowWindow(nint hwnd, int cmd);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(nint hwnd, out RECT rect);
+    [DllImport("user32.dll")] private static extern bool GetClientRect(nint hwnd, out RECT rect);
     [DllImport("user32.dll")] private static extern nint SetTimer(nint hwnd, nint id, uint ms, nint callback);
     [DllImport("user32.dll")] private static extern bool KillTimer(nint hwnd, nint id);
     [DllImport("user32.dll")] private static extern bool InvalidateRect(nint hwnd, nint rect, bool erase);
     [DllImport("user32.dll")] private static extern nint BeginPaint(nint hwnd, out PAINTSTRUCT ps);
     [DllImport("user32.dll")] private static extern bool EndPaint(nint hwnd, ref PAINTSTRUCT ps);
     [DllImport("user32.dll")] private static extern int FillRect(nint hdc, ref RECT rect, nint brush);
-    [DllImport("gdi32.dll")] private static extern nint CreateSolidBrush(uint color);
-    [DllImport("gdi32.dll")] private static extern bool DeleteObject(nint obj);
-    [DllImport("gdi32.dll")] private static extern uint SetTextColor(nint hdc, uint color);
-    [DllImport("gdi32.dll")] private static extern int SetBkMode(nint hdc, int mode);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int DrawText(nint hdc, string text, int count, ref RECT rect, uint format);
     [DllImport("user32.dll")] private static extern bool DrawIconEx(nint hdc, int x, int y, nint icon, int cx, int cy, uint step, nint brush, int flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int DrawText(nint hdc, string text, int count, ref RECT rect, uint format);
     [DllImport("user32.dll")] private static extern bool DestroyIcon(nint icon);
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHGetFileInfoW")] private static extern nint SHGetFileInfo(string path, uint attrs, ref SHFILEINFO info, uint size, uint flags);
     [DllImport("user32.dll")] private static extern nint MonitorFromWindow(nint hwnd, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfo(nint monitor, ref MONITORINFO info);
     [DllImport("user32.dll")] private static extern bool SetWindowRgn(nint hwnd, nint region, bool redraw);
+    [DllImport("user32.dll")] private static extern bool SetLayeredWindowAttributes(nint hwnd, uint colorKey, byte alpha, uint flags);
+    [DllImport("user32.dll")] private static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT trackEvent);
+
+    [DllImport("gdi32.dll")] private static extern nint CreateSolidBrush(uint color);
+    [DllImport("gdi32.dll")] private static extern nint CreatePen(int style, int width, uint color);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(nint obj);
+    [DllImport("gdi32.dll")] private static extern nint SelectObject(nint dc, nint obj);
+    [DllImport("gdi32.dll")] private static extern nint GetStockObject(int objectId);
+    [DllImport("gdi32.dll")] private static extern uint SetTextColor(nint hdc, uint color);
+    [DllImport("gdi32.dll")] private static extern int SetBkMode(nint hdc, int mode);
+    [DllImport("gdi32.dll")] private static extern bool RoundRect(nint hdc, int left, int top, int right, int bottom, int width, int height);
+    [DllImport("gdi32.dll")] private static extern bool MoveToEx(nint hdc, int x, int y, nint oldPoint);
+    [DllImport("gdi32.dll")] private static extern bool LineTo(nint hdc, int x, int y);
     [DllImport("gdi32.dll")] private static extern nint CreateRoundRectRgn(int left, int top, int right, int bottom, int width, int height);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHGetFileInfoW")] private static extern nint SHGetFileInfo(string path, uint attrs, ref SHFILEINFO info, uint size, uint flags);
 
     public static void Attach(nint pill)
     {
@@ -123,47 +154,70 @@ internal static unsafe class CapsuleQuickLauncher
         _config.Columns = Math.Clamp(_config.Columns, 1, 8);
         _config.IconSize = Math.Clamp(_config.IconSize, 20, 48);
         _config.AnimationMs = Math.Clamp(_config.AnimationMs, 80, 400);
-        _items = QuickAccessStore.Load().Where(x => x.Enabled && !string.IsNullOrWhiteSpace(x.Target)).OrderBy(x => x.Order).ToList();
+        _items = QuickAccessStore.Load()
+            .Where(x => x.Enabled && !string.IsNullOrWhiteSpace(x.Target))
+            .OrderBy(x => x.Order)
+            .ToList();
+
         ReloadIcons();
+        _hoverIndex = -1;
         if (!_config.Enabled || _items.Count == 0) Collapse(immediate: true);
         Reposition();
-        if (_toggle != 0) InvalidateRect(_toggle, 0, true);
-        if (_panel != 0) InvalidateRect(_panel, 0, true);
+        if (_toggle != 0) InvalidateRect(_toggle, 0, false);
+        if (_panel != 0) InvalidateRect(_panel, 0, false);
     }
 
     public static void Reposition()
     {
         if (_pill == 0 || _toggle == 0 || !GetWindowRect(_pill, out var pill)) return;
 
-        int toggleX = pill.Right - ToggleSize - 6;
-        int toggleY = pill.Top + (pill.Height - ToggleSize) / 2;
-        SetWindowPos(_toggle, 0, toggleX, toggleY, ToggleSize, ToggleSize, SWP_NOACTIVATE | SWP_NOZORDER);
-
         if (!_config.Enabled || _items.Count == 0)
         {
             ShowWindow(_toggle, SW_HIDE);
+            Collapse(immediate: true);
             return;
         }
-        ShowWindow(_toggle, SW_SHOWNOACTIVATE);
 
         int columns = Math.Min(_config.Columns, Math.Max(1, _items.Count));
         int rows = (_items.Count + columns - 1) / columns;
-        int cellHeight = _config.ShowLabels ? CellHeightLabels : CellHeightCompact;
-        _panelWidth = Padding * 2 + columns * CellWidth;
-        _panelHeight = Padding * 2 + rows * cellHeight;
+        int cellHeight = CellHeight();
+        int naturalWidth = PanelPadding * 2 + columns * CellWidth;
+
+        // El drawer nunca debe parecer una ventanita independiente cuando hay
+        // pocos accesos: como mínimo conserva el ancho de la cápsula.
+        _panelWidth = Math.Max(pill.Width, naturalWidth);
+        _panelHeight = PanelPadding * 2 + rows * cellHeight;
 
         nint monitor = MonitorFromWindow(_pill, 2);
         var mi = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
         GetMonitorInfo(monitor, ref mi);
 
-        bool roomBelow = pill.Bottom + Gap + _panelHeight <= mi.rcWork.Bottom;
-        _opensUp = _config.Direction == QuickLauncherDirection.Up || (_config.Direction == QuickLauncherDirection.Auto && !roomBelow);
+        bool roomBelow = pill.Bottom + PanelGap + _panelHeight <= mi.rcWork.Bottom;
+        _opensUp = _config.Direction == QuickLauncherDirection.Up
+            || (_config.Direction == QuickLauncherDirection.Auto && !roomBelow);
 
-        _panelX = Math.Clamp(pill.Right - _panelWidth, mi.rcWork.Left, Math.Max(mi.rcWork.Left, mi.rcWork.Right - _panelWidth));
-        _panelY = _opensUp ? pill.Top - Gap - _panelHeight : pill.Bottom + Gap;
+        _panelWidth = Math.Min(_panelWidth, mi.rcWork.Width);
+        _panelX = Math.Clamp(pill.Right - _panelWidth, mi.rcWork.Left,
+            Math.Max(mi.rcWork.Left, mi.rcWork.Right - _panelWidth));
+        _panelY = _opensUp
+            ? pill.Top - PanelGap - _panelHeight
+            : pill.Bottom + PanelGap;
+
+        // El botón deja de tapar Batería/RAM. Se vuelve una pequeña pestaña
+        // unida al borde de la cápsula y señala físicamente hacia el drawer.
+        int toggleX = pill.Right - ToggleWidth - 12;
+        int toggleY = _opensUp
+            ? pill.Top - ToggleHeight + ToggleOverlap
+            : pill.Bottom - ToggleOverlap;
+        SetWindowPos(_toggle, 0, toggleX, toggleY, ToggleWidth, ToggleHeight,
+            SWP_NOACTIVATE | SWP_NOZORDER);
+        nint toggleRegion = CreateRoundRectRgn(0, 0, ToggleWidth + 1, ToggleHeight + 1, 12, 12);
+        SetWindowRgn(_toggle, toggleRegion, true);
+        ShowWindow(_toggle, SW_SHOWNOACTIVATE);
 
         if (_expanded && _panel != 0)
-            SetWindowPos(_panel, 0, _panelX, _panelY, _panelWidth, _panelHeight, SWP_NOACTIVATE | SWP_NOZORDER);
+            SetWindowPos(_panel, 0, _panelX, _panelY, _panelWidth, _panelHeight,
+                SWP_NOACTIVATE | SWP_NOZORDER);
     }
 
     public static void Toggle()
@@ -179,10 +233,13 @@ internal static unsafe class CapsuleQuickLauncher
         {
             KillTimer(_panel, AnimationTimer);
             _expanded = false;
+            _animationFactor = 0;
+            _hoverIndex = -1;
             ShowWindow(_panel, SW_HIDE);
-            InvalidateRect(_toggle, 0, true);
+            if (_toggle != 0) InvalidateRect(_toggle, 0, false);
             return;
         }
+
         if (!_expanded) return;
         _opening = false;
         _animationStart = DateTime.UtcNow;
@@ -201,11 +258,17 @@ internal static unsafe class CapsuleQuickLauncher
         Reposition();
         _expanded = true;
         _opening = true;
+        _animationFactor = 0;
         _animationStart = DateTime.UtcNow;
+        _hoverIndex = -1;
+
+        SetLayeredWindowAttributes(_panel, 0, 0, LWA_ALPHA);
         ShowWindow(_panel, SW_SHOWNOACTIVATE);
-        SetWindowPos(_panel, 0, _panelX, _opensUp ? _panelY + _panelHeight - 1 : _panelY, _panelWidth, 1, SWP_NOACTIVATE | SWP_NOZORDER);
+        SetWindowPos(_panel, 0, _panelX,
+            _opensUp ? _panelY + _panelHeight - 1 : _panelY,
+            _panelWidth, 1, SWP_NOACTIVATE | SWP_NOZORDER);
         SetTimer(_panel, AnimationTimer, 16, 0);
-        InvalidateRect(_toggle, 0, true);
+        InvalidateRect(_toggle, 0, false);
     }
 
     private static void EnsureWindows()
@@ -217,18 +280,39 @@ internal static unsafe class CapsuleQuickLauncher
             Register(PanelClass, (nint)(delegate* unmanaged<nint, uint, nint, nint, nint>)&PanelProc);
             _registered = true;
         }
+
         if (_toggle == 0)
-            _toggle = CreateWindowEx(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, ToggleClass, "", WS_POPUP, 0, 0, ToggleSize, ToggleSize, _pill, 0, _instance, 0);
+            _toggle = CreateWindowEx(
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                ToggleClass, "", WS_POPUP, 0, 0, ToggleWidth, ToggleHeight,
+                _pill, 0, _instance, 0);
+
         if (_panel == 0)
-            _panel = CreateWindowEx(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, PanelClass, "", WS_POPUP, 0, 0, 1, 1, _pill, 0, _instance, 0);
+            _panel = CreateWindowEx(
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+                PanelClass, "", WS_POPUP, 0, 0, 1, 1,
+                _pill, 0, _instance, 0);
     }
 
     private static void Register(string className, nint proc)
     {
-        var cls = new WNDCLASSEX { cbSize = (uint)Marshal.SizeOf<WNDCLASSEX>(), lpfnWndProc = proc, hInstance = _instance, hCursor = NativeMethods.LoadCursor(0, (nint)32512) };
+        var cls = new WNDCLASSEX
+        {
+            cbSize = (uint)Marshal.SizeOf<WNDCLASSEX>(),
+            lpfnWndProc = proc,
+            hInstance = _instance,
+            hCursor = NativeMethods.LoadCursor(0, (nint)32512),
+        };
         nint p = Marshal.StringToHGlobalUni(className);
-        try { cls.lpszClassName = p; RegisterClassEx(ref cls); }
-        finally { Marshal.FreeHGlobal(p); }
+        try
+        {
+            cls.lpszClassName = p;
+            RegisterClassEx(ref cls);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(p);
+        }
     }
 
     [UnmanagedCallersOnly]
@@ -251,6 +335,8 @@ internal static unsafe class CapsuleQuickLauncher
         {
             if (msg == WM_PAINT) { PaintPanel(hwnd); return 0; }
             if (msg == WM_LBUTTONUP) { LaunchAt(lParam); return 0; }
+            if (msg == WM_MOUSEMOVE) { HandleMouseMove(hwnd, lParam); return 0; }
+            if (msg == WM_MOUSELEAVE) { HandleMouseLeave(); return 0; }
             if (msg == WM_TIMER && wParam == AnimationTimer) { Animate(); return 0; }
             if (msg == WM_DESTROY) { _panel = 0; return 0; }
         }
@@ -263,81 +349,203 @@ internal static unsafe class CapsuleQuickLauncher
         double duration = Math.Max(80, _config.AnimationMs);
         double t = Math.Clamp((DateTime.UtcNow - _animationStart).TotalMilliseconds / duration, 0, 1);
         double eased = 1 - Math.Pow(1 - t, 3);
-        double factor = _opening ? eased : 1 - eased;
-        int h = Math.Max(1, (int)Math.Round(_panelHeight * factor));
+        _animationFactor = _opening ? eased : 1 - eased;
+
+        int h = Math.Max(1, (int)Math.Round(_panelHeight * _animationFactor));
         int y = _opensUp ? _panelY + _panelHeight - h : _panelY;
-        SetWindowPos(_panel, 0, _panelX, y, _panelWidth, h, SWP_NOACTIVATE | SWP_NOZORDER);
-        nint rgn = CreateRoundRectRgn(0, 0, _panelWidth + 1, h + 1, 18, 18);
-        SetWindowRgn(_panel, rgn, true);
+        SetWindowPos(_panel, 0, _panelX, y, _panelWidth, h,
+            SWP_NOACTIVATE | SWP_NOZORDER);
+
+        nint region = CreateRoundRectRgn(0, 0, _panelWidth + 1, h + 1,
+            PanelRadius, PanelRadius);
+        SetWindowRgn(_panel, region, true);
+
+        byte alpha = (byte)Math.Clamp(120 + 135 * _animationFactor, 0, 255);
+        SetLayeredWindowAttributes(_panel, 0, alpha, LWA_ALPHA);
+        InvalidateRect(_toggle, 0, false);
+
         if (t < 1) return;
         KillTimer(_panel, AnimationTimer);
+
         if (!_opening)
         {
             _expanded = false;
+            _animationFactor = 0;
+            _hoverIndex = -1;
             ShowWindow(_panel, SW_HIDE);
-            InvalidateRect(_toggle, 0, true);
+            InvalidateRect(_toggle, 0, false);
+        }
+        else
+        {
+            _animationFactor = 1;
+            SetLayeredWindowAttributes(_panel, 0, 255, LWA_ALPHA);
         }
     }
 
     private static void PaintToggle(nint hwnd)
     {
         nint dc = BeginPaint(hwnd, out var ps);
-        var rect = new RECT { Left = 0, Top = 0, Right = ToggleSize, Bottom = ToggleSize };
-        nint bg = CreateSolidBrush(0x00201D1B);
-        FillRect(dc, ref rect, bg);
+        GetClientRect(hwnd, out var rect);
+
+        nint bg = CreateSolidBrush(Background);
+        nint borderPen = CreatePen(PS_SOLID, 1, Border);
+        nint oldBrush = SelectObject(dc, bg);
+        nint oldPen = SelectObject(dc, borderPen);
+        RoundRect(dc, 0, 0, rect.Right, rect.Bottom, 12, 12);
+
+        nint chevronPen = CreatePen(PS_SOLID, 2, Accent);
+        SelectObject(dc, chevronPen);
+
+        double p = _expanded ? Math.Max(_animationFactor, 0.05) : 0;
+        int sideY = (int)Math.Round(7 + 5 * p);
+        int centerY = (int)Math.Round(12 - 5 * p);
+        int centerX = rect.Width / 2;
+        MoveToEx(dc, centerX - 5, sideY, 0);
+        LineTo(dc, centerX, centerY);
+        LineTo(dc, centerX + 5, sideY);
+
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(chevronPen);
+        DeleteObject(borderPen);
         DeleteObject(bg);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, 0x00BED12A);
-        string glyph = _expanded ? "⌃" : "⌄";
-        DrawText(dc, glyph, glyph.Length, ref rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         EndPaint(hwnd, ref ps);
     }
 
     private static void PaintPanel(nint hwnd)
     {
         nint dc = BeginPaint(hwnd, out var ps);
-        GetWindowRect(hwnd, out var wr);
-        var bgRect = new RECT { Left = 0, Top = 0, Right = wr.Width, Bottom = wr.Height };
-        nint bg = CreateSolidBrush(0x0013100F);
-        FillRect(dc, ref bgRect, bg);
+        GetClientRect(hwnd, out var client);
+
+        nint bg = CreateSolidBrush(Background);
+        FillRect(dc, ref client, bg);
         DeleteObject(bg);
+
+        // Borde sutil: el panel conserva el mismo lenguaje visual de la cápsula.
+        nint borderPen = CreatePen(PS_SOLID, 1, Border);
+        nint nullBrush = GetStockObject(5); // NULL_BRUSH
+        nint oldBrush = SelectObject(dc, nullBrush);
+        nint oldPen = SelectObject(dc, borderPen);
+        RoundRect(dc, 0, 0, Math.Max(1, client.Right - 1), Math.Max(1, client.Bottom - 1),
+            PanelRadius, PanelRadius);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(borderPen);
+
         SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
 
         int columns = Math.Min(_config.Columns, Math.Max(1, _items.Count));
-        int cellHeight = _config.ShowLabels ? CellHeightLabels : CellHeightCompact;
-        for (int i = 0; i < _items.Count; i++)
-        {
-            int col = i % columns;
-            int row = i / columns;
-            int left = Padding + col * CellWidth;
-            int top = Padding + row * cellHeight;
-            int iconSize = _config.IconSize;
-            int iconX = left + (CellWidth - iconSize) / 2;
-            int iconY = top + 4;
-            if (i < Icons.Count && Icons[i] != 0)
-                DrawIconEx(dc, iconX, iconY, Icons[i], iconSize, iconSize, 0, 0, DI_NORMAL);
+        int cellHeight = CellHeight();
+        int rows = (_items.Count + columns - 1) / columns;
 
-            if (_config.ShowLabels)
+        for (int row = 0; row < rows; row++)
+        {
+            int first = row * columns;
+            int rowCount = Math.Min(columns, _items.Count - first);
+            int rowLeft = (_panelWidth - rowCount * CellWidth) / 2;
+
+            for (int col = 0; col < rowCount; col++)
             {
-                var text = new RECT { Left = left + 3, Top = iconY + iconSize + 5, Right = left + CellWidth - 3, Bottom = top + cellHeight - 3 };
-                SetTextColor(dc, 0x00F5F0EA);
-                DrawText(dc, _items[i].Name, _items[i].Name.Length, ref text, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                int i = first + col;
+                int left = rowLeft + col * CellWidth;
+                int top = PanelPadding + row * cellHeight;
+
+                if (i == _hoverIndex)
+                    DrawHover(dc, left + ItemInset, top + ItemInset,
+                        CellWidth - ItemInset * 2, cellHeight - ItemInset * 2);
+
+                int iconSize = _config.IconSize;
+                int iconX = left + (CellWidth - iconSize) / 2;
+                int iconY = top + (_config.ShowLabels ? 7 : (cellHeight - iconSize) / 2);
+                if (i < Icons.Count && Icons[i] != 0)
+                    DrawIconEx(dc, iconX, iconY, Icons[i], iconSize, iconSize, 0, 0, DI_NORMAL);
+
+                if (_config.ShowLabels)
+                {
+                    var textRect = new RECT
+                    {
+                        Left = left + 5,
+                        Top = iconY + iconSize + 4,
+                        Right = left + CellWidth - 5,
+                        Bottom = top + cellHeight - 4,
+                    };
+                    SetTextColor(dc, Text);
+                    DrawText(dc, _items[i].Name, _items[i].Name.Length, ref textRect,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                }
             }
         }
+
         EndPaint(hwnd, ref ps);
+    }
+
+    private static void DrawHover(nint dc, int x, int y, int width, int height)
+    {
+        nint brush = CreateSolidBrush(Hover);
+        nint oldBrush = SelectObject(dc, brush);
+        nint oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+        RoundRect(dc, x, y, x + width, y + height, 12, 12);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(brush);
+    }
+
+    private static void HandleMouseMove(nint hwnd, nint lParam)
+    {
+        if (!_trackingMouse)
+        {
+            var track = new TRACKMOUSEEVENT
+            {
+                cbSize = (uint)Marshal.SizeOf<TRACKMOUSEEVENT>(),
+                dwFlags = TME_LEAVE,
+                hwndTrack = hwnd,
+            };
+            TrackMouseEvent(ref track);
+            _trackingMouse = true;
+        }
+
+        int x = unchecked((short)((long)lParam & 0xFFFF));
+        int y = unchecked((short)(((long)lParam >> 16) & 0xFFFF));
+        int next = HitTest(x, y);
+        if (next == _hoverIndex) return;
+        _hoverIndex = next;
+        InvalidateRect(_panel, 0, false);
+    }
+
+    private static void HandleMouseLeave()
+    {
+        _trackingMouse = false;
+        if (_hoverIndex == -1) return;
+        _hoverIndex = -1;
+        if (_panel != 0) InvalidateRect(_panel, 0, false);
+    }
+
+    private static int HitTest(int x, int y)
+    {
+        if (y < PanelPadding) return -1;
+        int columns = Math.Min(_config.Columns, Math.Max(1, _items.Count));
+        int cellHeight = CellHeight();
+        int row = (y - PanelPadding) / cellHeight;
+        if (row < 0) return -1;
+
+        int first = row * columns;
+        if (first >= _items.Count) return -1;
+        int rowCount = Math.Min(columns, _items.Count - first);
+        int rowLeft = (_panelWidth - rowCount * CellWidth) / 2;
+        if (x < rowLeft || x >= rowLeft + rowCount * CellWidth) return -1;
+
+        int col = (x - rowLeft) / CellWidth;
+        int index = first + col;
+        return (uint)index < (uint)_items.Count ? index : -1;
     }
 
     private static void LaunchAt(nint lParam)
     {
         int x = unchecked((short)((long)lParam & 0xFFFF));
         int y = unchecked((short)(((long)lParam >> 16) & 0xFFFF));
-        int columns = Math.Min(_config.Columns, Math.Max(1, _items.Count));
-        int cellHeight = _config.ShowLabels ? CellHeightLabels : CellHeightCompact;
-        int col = (x - Padding) / CellWidth;
-        int row = (y - Padding) / cellHeight;
-        if (x < Padding || y < Padding || col < 0 || col >= columns || row < 0) return;
-        int index = row * columns + col;
-        if ((uint)index >= (uint)_items.Count) return;
+        int index = HitTest(x, y);
+        if (index < 0) return;
 
         var item = _items[index];
         try
@@ -348,7 +556,9 @@ internal static unsafe class CapsuleQuickLauncher
             {
                 FileName = target,
                 Arguments = args,
-                WorkingDirectory = string.IsNullOrWhiteSpace(item.WorkingDirectory) ? ResolveWorkingDirectory(target) : Environment.ExpandEnvironmentVariables(item.WorkingDirectory),
+                WorkingDirectory = string.IsNullOrWhiteSpace(item.WorkingDirectory)
+                    ? ResolveWorkingDirectory(target)
+                    : Environment.ExpandEnvironmentVariables(item.WorkingDirectory),
                 UseShellExecute = true,
             };
             Process.Start(start);
@@ -363,18 +573,29 @@ internal static unsafe class CapsuleQuickLauncher
         return string.Empty;
     }
 
+    private static int CellHeight() =>
+        _config.ShowLabels ? Math.Max(62, _config.IconSize + 31) : Math.Max(50, _config.IconSize + 14);
+
     private static void ReloadIcons(bool clearOnly = false)
     {
-        foreach (nint icon in Icons) if (icon != 0) DestroyIcon(icon);
+        foreach (nint icon in Icons)
+            if (icon != 0) DestroyIcon(icon);
         Icons.Clear();
         if (clearOnly) return;
+
         foreach (var item in _items)
         {
-            string source = item.IconMode == QuickAccessIconMode.Custom && !string.IsNullOrWhiteSpace(item.IconPath) ? item.IconPath : item.Target;
+            string source = item.IconMode == QuickAccessIconMode.Custom && !string.IsNullOrWhiteSpace(item.IconPath)
+                ? item.IconPath
+                : item.Target;
             source = Environment.ExpandEnvironmentVariables(source);
             var info = new SHFILEINFO();
-            nint ok = SHGetFileInfo(source, 0, ref info, (uint)Marshal.SizeOf<SHFILEINFO>(), SHGFI_ICON | SHGFI_LARGEICON);
+            nint ok = SHGetFileInfo(source, 0, ref info,
+                (uint)Marshal.SizeOf<SHFILEINFO>(), SHGFI_ICON | SHGFI_LARGEICON);
             Icons.Add(ok == 0 ? 0 : info.hIcon);
         }
     }
+
+    private static uint Rgb(byte r, byte g, byte b) =>
+        (uint)(r | (g << 8) | (b << 16));
 }
