@@ -106,6 +106,7 @@ internal static unsafe class CapsuleQuickLauncher
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern nint CreateWindowEx(int exStyle, string cls, string name, uint style, int x, int y, int w, int h, nint parent, nint menu, nint instance, nint param);
     [DllImport("user32.dll")] private static extern nint DefWindowProc(nint hwnd, uint msg, nint wParam, nint lParam);
     [DllImport("user32.dll")] private static extern bool ShowWindow(nint hwnd, int cmd);
+    [DllImport("user32.dll")] private static extern bool DestroyWindow(nint hwnd);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(nint hwnd, out RECT rect);
     [DllImport("user32.dll")] private static extern bool GetClientRect(nint hwnd, out RECT rect);
@@ -154,7 +155,10 @@ internal static unsafe class CapsuleQuickLauncher
             .OrderBy(x => x.Order)
             .ToList();
 
-        ReloadIcons();
+        // Los iconos de Shell se reservan solamente mientras el launcher está
+        // visible. Conservarlos cuando está plegado eleva la RAM residente sin
+        // aportar nada al monitor.
+        if (_expanded) ReloadIcons(); else ReloadIcons(clearOnly: true);
         _hoverIndex = -1;
         if (!_config.Enabled || _items.Count == 0) Collapse(immediate: true);
         Reposition();
@@ -214,23 +218,36 @@ internal static unsafe class CapsuleQuickLauncher
 
     public static void Toggle()
     {
+        if (_expanded)
+        {
+            Collapse(false);
+            return;
+        }
+
+        // El editor de ajustes vive en otro proceso. Releer al abrir evita
+        // que la cápsula conserve una lista parcial después de guardar.
+        Reload();
         if (!_config.Enabled || _items.Count == 0) return;
-        if (_expanded) Collapse(false); else Expand();
+        Expand();
     }
 
     public static void Collapse(bool immediate)
     {
-        if (_panel == 0) return;
         if (immediate)
         {
-            KillTimer(_panel, AnimationTimer);
+            if (_panel != 0)
+            {
+                KillTimer(_panel, AnimationTimer);
+                ShowWindow(_panel, SW_HIDE);
+            }
             _expanded = false;
             _animationFactor = 0;
             _hoverIndex = -1;
-            ShowWindow(_panel, SW_HIDE);
+            ReleasePanelResources();
             return;
         }
 
+        if (_panel == 0) return;
         if (!_expanded) return;
         _opening = false;
         _animationStart = DateTime.UtcNow;
@@ -239,13 +256,14 @@ internal static unsafe class CapsuleQuickLauncher
 
     public static void Dispose()
     {
-        ReloadIcons(clearOnly: true);
+        ReleasePanelResources();
         _pill = 0;
     }
 
     private static void Expand()
     {
         EnsureWindows();
+        ReloadIcons();
         Reposition();
         _expanded = true;
         _opening = true;
@@ -345,6 +363,7 @@ internal static unsafe class CapsuleQuickLauncher
             _animationFactor = 0;
             _hoverIndex = -1;
             ShowWindow(_panel, SW_HIDE);
+            ReleasePanelResources();
         }
         else
         {
@@ -515,6 +534,13 @@ internal static unsafe class CapsuleQuickLauncher
 
     private static int CellHeight() =>
         _config.ShowLabels ? Math.Max(62, _config.IconSize + 31) : Math.Max(50, _config.IconSize + 14);
+
+    private static void ReleasePanelResources()
+    {
+        ReloadIcons(clearOnly: true);
+        if (_panel != 0)
+            DestroyWindow(_panel);
+    }
 
     private static void GetGrid(out int columns, out int rows)
     {

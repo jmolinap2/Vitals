@@ -715,6 +715,7 @@ internal static class PillWindow
 
             case WM_RELOAD_CONFIG:
                 ReloadConfig();
+                CapsuleQuickLauncher.Reload();
                 return 0;
 
             case WM_NCHITTEST:
