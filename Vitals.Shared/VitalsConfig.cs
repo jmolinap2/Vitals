@@ -32,6 +32,25 @@ public sealed class QuickAccessItem
     public int Order { get; set; }
 }
 
+public static class QuickAccessStore
+{
+    public static string Path => System.IO.Path.Combine(VitalsConfig.InstallDir, "quick-access.json");
+
+    public static List<QuickAccessItem> Load()
+    {
+        if (!File.Exists(Path)) return [];
+        string json = File.ReadAllText(Path);
+        return JsonSerializer.Deserialize(json, VitalsJsonContext.Default.ListQuickAccessItem) ?? [];
+    }
+
+    public static void Save(IEnumerable<QuickAccessItem> items)
+    {
+        Directory.CreateDirectory(VitalsConfig.InstallDir);
+        string json = JsonSerializer.Serialize(items.ToList(), VitalsJsonContext.Default.ListQuickAccessItem);
+        File.WriteAllText(Path, json);
+    }
+}
+
 public sealed class MetricEntry
 {
     public MetricKey Key { get; set; }
@@ -50,7 +69,6 @@ public sealed class MetricEntry
 public sealed class VitalsConfig
 {
     public List<MetricEntry> Metrics { get; set; } = DefaultOrder();
-    public List<QuickAccessItem> QuickAccess { get; set; } = [];
     public double Scale { get; set; } = 1.0;
     public double Opacity { get; set; } = 0.95;
 
@@ -91,10 +109,10 @@ public sealed class VitalsConfig
         new() { Key = MetricKey.Battery },
     ];
 
-    public static string InstallDir => Path.Combine(
+    public static string InstallDir => System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Vitals");
 
-    public static string ConfigPath => Path.Combine(InstallDir, "config.json");
+    public static string ConfigPath => System.IO.Path.Combine(InstallDir, "config.json");
 
     // Sin config.json todavía es el estado normal de un primer arranque, no
     // un error — se resuelve con los valores por defecto, no con un catch-all.
@@ -119,4 +137,5 @@ public sealed class VitalsConfig
 
 [JsonSourceGenerationOptions(WriteIndented = true)]
 [JsonSerializable(typeof(VitalsConfig))]
+[JsonSerializable(typeof(List<QuickAccessItem>))]
 public partial class VitalsJsonContext : JsonSerializerContext;
