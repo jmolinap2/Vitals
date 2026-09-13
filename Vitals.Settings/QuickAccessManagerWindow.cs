@@ -165,26 +165,36 @@ internal sealed class QuickAccessManagerWindow : Window
         border.SetValue(Border.PaddingProperty, new Thickness(12, 9, 12, 9));
         border.SetValue(Border.MarginProperty, new Thickness(0, 0, 0, 7));
 
-        var grid = new FrameworkElementFactory(typeof(Grid));
-        var c1 = new FrameworkElementFactory(typeof(ColumnDefinition)); c1.SetValue(ColumnDefinition.WidthProperty, new GridLength(1, GridUnitType.Star));
-        var c2 = new FrameworkElementFactory(typeof(ColumnDefinition)); c2.SetValue(ColumnDefinition.WidthProperty, GridLength.Auto);
-        grid.AppendChild(c1); grid.AppendChild(c2);
+        var dock = new FrameworkElementFactory(typeof(DockPanel));
+        dock.SetValue(DockPanel.LastChildFillProperty, true);
+
+        var active = new FrameworkElementFactory(typeof(CheckBox));
+        active.SetBinding(CheckBox.IsCheckedProperty, new System.Windows.Data.Binding(nameof(QuickAccessItem.Enabled)) { Mode = System.Windows.Data.BindingMode.TwoWay });
+        active.SetValue(ContentControl.ContentProperty, "Activo");
+        active.SetValue(Control.ForegroundProperty, Muted);
+        active.SetValue(DockPanel.DockProperty, Dock.Right);
+        active.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        active.SetValue(FrameworkElement.MarginProperty, new Thickness(16, 0, 0, 0));
+        dock.AppendChild(active);
 
         var panel = new FrameworkElementFactory(typeof(StackPanel));
         var name = new FrameworkElementFactory(typeof(TextBlock));
         name.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding(nameof(QuickAccessItem.Name)));
-        name.SetValue(TextBlock.ForegroundProperty, Text); name.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold); name.SetValue(TextBlock.FontSizeProperty, 13.5d);
+        name.SetValue(TextBlock.ForegroundProperty, Text);
+        name.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
+        name.SetValue(TextBlock.FontSizeProperty, 13.5d);
         panel.AppendChild(name);
+
         var target = new FrameworkElementFactory(typeof(TextBlock));
         target.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding(nameof(QuickAccessItem.Target)));
-        target.SetValue(TextBlock.ForegroundProperty, Muted); target.SetValue(TextBlock.FontSizeProperty, 11d); target.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis); target.SetValue(FrameworkElement.MarginProperty, new Thickness(0,3,0,0));
+        target.SetValue(TextBlock.ForegroundProperty, Muted);
+        target.SetValue(TextBlock.FontSizeProperty, 11d);
+        target.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
+        target.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 3, 0, 0));
         panel.AppendChild(target);
-        grid.AppendChild(panel);
-        var active = new FrameworkElementFactory(typeof(CheckBox));
-        active.SetBinding(CheckBox.IsCheckedProperty, new System.Windows.Data.Binding(nameof(QuickAccessItem.Enabled)) { Mode = System.Windows.Data.BindingMode.TwoWay });
-        active.SetValue(ContentControl.ContentProperty, "Activo"); active.SetValue(Control.ForegroundProperty, Muted); active.SetValue(Grid.ColumnProperty, 1); active.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-        grid.AppendChild(active);
-        border.AppendChild(grid);
+        dock.AppendChild(panel);
+
+        border.AppendChild(dock);
         template.VisualTree = border;
         return template;
     }
