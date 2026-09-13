@@ -3,6 +3,7 @@ bin/
 obj/
 publish/
 out/
+Vitals-win-x64/
 
 # Visual Studio / Rider
 .vs/
