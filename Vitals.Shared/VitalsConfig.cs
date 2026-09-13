@@ -19,6 +19,13 @@ public enum QuickAccessIconMode
     Custom,
 }
 
+public enum QuickLauncherDirection
+{
+    Auto,
+    Down,
+    Up,
+}
+
 public sealed class QuickAccessItem
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -30,6 +37,17 @@ public sealed class QuickAccessItem
     public string? IconPath { get; set; }
     public bool Enabled { get; set; } = true;
     public int Order { get; set; }
+}
+
+public sealed class QuickLauncherConfig
+{
+    public bool Enabled { get; set; } = true;
+    public int Columns { get; set; } = 4;
+    public int IconSize { get; set; } = 32;
+    public bool ShowLabels { get; set; } = true;
+    public int AnimationMs { get; set; } = 160;
+    public bool CollapseOnLaunch { get; set; } = true;
+    public QuickLauncherDirection Direction { get; set; } = QuickLauncherDirection.Auto;
 }
 
 public static class QuickAccessStore
@@ -47,6 +65,25 @@ public static class QuickAccessStore
     {
         Directory.CreateDirectory(VitalsConfig.InstallDir);
         string json = JsonSerializer.Serialize(items.ToList(), VitalsJsonContext.Default.ListQuickAccessItem);
+        File.WriteAllText(Path, json);
+    }
+}
+
+public static class QuickLauncherStore
+{
+    public static string Path => System.IO.Path.Combine(VitalsConfig.InstallDir, "quick-launcher.json");
+
+    public static QuickLauncherConfig Load()
+    {
+        if (!File.Exists(Path)) return new QuickLauncherConfig();
+        string json = File.ReadAllText(Path);
+        return JsonSerializer.Deserialize(json, VitalsJsonContext.Default.QuickLauncherConfig) ?? new QuickLauncherConfig();
+    }
+
+    public static void Save(QuickLauncherConfig config)
+    {
+        Directory.CreateDirectory(VitalsConfig.InstallDir);
+        string json = JsonSerializer.Serialize(config, VitalsJsonContext.Default.QuickLauncherConfig);
         File.WriteAllText(Path, json);
     }
 }
@@ -138,4 +175,5 @@ public sealed class VitalsConfig
 [JsonSourceGenerationOptions(WriteIndented = true)]
 [JsonSerializable(typeof(VitalsConfig))]
 [JsonSerializable(typeof(List<QuickAccessItem>))]
+[JsonSerializable(typeof(QuickLauncherConfig))]
 public partial class VitalsJsonContext : JsonSerializerContext;
