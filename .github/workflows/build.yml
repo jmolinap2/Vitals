@@ -10,7 +10,22 @@ permissions:
   contents: read
 
 jobs:
+  integrity:
+    name: Repository integrity
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Security integrity checks
+        shell: pwsh
+        run: ./.github/scripts/repository-integrity.ps1
+
   build:
+    name: Build
+    needs: integrity
     runs-on: windows-latest
     steps:
       - name: Checkout
