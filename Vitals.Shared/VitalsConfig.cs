@@ -13,6 +13,25 @@ public enum Corner
     BottomLeft, Bottom, BottomRight,
 }
 
+public enum QuickAccessIconMode
+{
+    Automatic,
+    Custom,
+}
+
+public sealed class QuickAccessItem
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = string.Empty;
+    public string Target { get; set; } = string.Empty;
+    public string? Arguments { get; set; }
+    public string? WorkingDirectory { get; set; }
+    public QuickAccessIconMode IconMode { get; set; } = QuickAccessIconMode.Automatic;
+    public string? IconPath { get; set; }
+    public bool Enabled { get; set; } = true;
+    public int Order { get; set; }
+}
+
 public sealed class MetricEntry
 {
     public MetricKey Key { get; set; }
@@ -31,6 +50,7 @@ public sealed class MetricEntry
 public sealed class VitalsConfig
 {
     public List<MetricEntry> Metrics { get; set; } = DefaultOrder();
+    public List<QuickAccessItem> QuickAccess { get; set; } = [];
     public double Scale { get; set; } = 1.0;
     public double Opacity { get; set; } = 0.95;
 
