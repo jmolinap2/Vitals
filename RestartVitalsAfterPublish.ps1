@@ -19,38 +19,30 @@ if (-not (Test-Path -LiteralPath $stagedExecutable -PathType Leaf)) {
     throw "No se encontró el ejecutable preparado para instalar: $stagedExecutable"
 }
 
-# La publicación se genera primero fuera de la instalación. Así no falla por
-# el bloqueo que Windows mantiene sobre un .exe que está corriendo. Solo se
-# cierran procesos que proceden exactamente de esta instalación.
-function Stop-InstalledProcess([string]$Name, [string]$ExecutablePath) {
-    $running = Get-Process -Name $Name -ErrorAction SilentlyContinue | Where-Object {
-        try {
-            [string]::Equals($_.Path, $ExecutablePath, [System.StringComparison]::OrdinalIgnoreCase)
-        }
-        catch {
-            $false
-        }
-    }
-
+# La publicación se genera primero fuera de la instalación. Vitalis y su
+# configuración tienen nombres de proceso propios; cerrarlos por nombre evita
+# que una DLL de ajustes mantenga la instalación bloqueada a mitad del cambio.
+function Stop-VitalsProcess([string]$Name) {
+    $running = @(Get-Process -Name $Name -ErrorAction SilentlyContinue)
     if ($running) {
-        $running | Stop-Process -Force
-        $running | Wait-Process -Timeout 5 -ErrorAction SilentlyContinue
+        $running | Stop-Process -Force -ErrorAction Stop
+        $running | Wait-Process -Timeout 5 -ErrorAction Stop
         return $true
     }
 
     return $false
 }
 
-$settingsWasRunning = Stop-InstalledProcess 'VitalsSettings' $installedSettingsExecutable
-[void](Stop-InstalledProcess 'Vitals' $installedExecutable)
+$settingsWasRunning = Stop-VitalsProcess 'VitalsSettings'
+[void](Stop-VitalsProcess 'Vitals')
 
 New-Item -ItemType Directory -Path $installedDirectory -Force | Out-Null
-Copy-Item -LiteralPath $stagedExecutable -Destination $installedExecutable -Force
+Copy-Item -LiteralPath $stagedExecutable -Destination $installedExecutable -Force -ErrorAction Stop
 
 foreach ($symbol in @('Vitals.pdb')) {
     $source = Join-Path $stagedDirectory $symbol
     if (Test-Path -LiteralPath $source -PathType Leaf) {
-        Copy-Item -LiteralPath $source -Destination (Join-Path $installedDirectory $symbol) -Force
+        Copy-Item -LiteralPath $source -Destination (Join-Path $installedDirectory $symbol) -Force -ErrorAction Stop
     }
 }
 
@@ -62,7 +54,7 @@ if (-not (Test-Path -LiteralPath $StagedSettingsDirectory -PathType Container)) 
 }
 
 Get-ChildItem -LiteralPath $StagedSettingsDirectory -File | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $installedDirectory $_.Name) -Force
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $installedDirectory $_.Name) -Force -ErrorAction Stop
 }
 
 Start-Process -FilePath $installedExecutable -WorkingDirectory (Split-Path -Parent $installedExecutable)
