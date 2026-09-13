@@ -24,6 +24,15 @@ public enum QuickLauncherDirection
     Auto,
     Down,
     Up,
+    Right,
+    Left,
+}
+
+public enum QuickLauncherLayout
+{
+    Grid,
+    Row,
+    Column,
 }
 
 public sealed class QuickAccessItem
@@ -48,6 +57,7 @@ public sealed class QuickLauncherConfig
     public int AnimationMs { get; set; } = 160;
     public bool CollapseOnLaunch { get; set; } = true;
     public QuickLauncherDirection Direction { get; set; } = QuickLauncherDirection.Auto;
+    public QuickLauncherLayout Layout { get; set; } = QuickLauncherLayout.Grid;
 }
 
 public static class QuickAccessStore

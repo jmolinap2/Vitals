@@ -21,6 +21,7 @@ internal sealed class QuickAccessManagerWindow : Window
     private readonly ComboBox _iconSize;
     private readonly ComboBox _animation;
     private readonly ComboBox _direction;
+    private readonly ComboBox _layout;
 
     private static readonly Brush Bg = BrushFrom("#0F1116");
     private static readonly Brush Card = BrushFrom("#171A21");
@@ -104,22 +105,32 @@ internal sealed class QuickAccessManagerWindow : Window
         right.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         right.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         right.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        right.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         Grid.SetColumn(right, 1);
         optionGrid.Children.Add(right);
 
         _columns = Combo(new object[] { 2, 3, 4, 5, 6 }, Math.Clamp(launcher.Columns, 2, 6));
         _iconSize = Combo(new object[] { 24, 28, 32, 36, 40, 44, 48 }, Nearest(new[] { 24, 28, 32, 36, 40, 44, 48 }, launcher.IconSize));
         _animation = Combo(new object[] { 100, 120, 160, 200, 250, 300 }, Nearest(new[] { 100, 120, 160, 200, 250, 300 }, launcher.AnimationMs));
-        _direction = Combo(new object[] { "Automático", "Abajo", "Arriba" }, launcher.Direction switch
+        _direction = Combo(new object[] { "Automático", "Abajo", "Arriba", "Derecha", "Izquierda" }, launcher.Direction switch
         {
             QuickLauncherDirection.Down => "Abajo",
             QuickLauncherDirection.Up => "Arriba",
+            QuickLauncherDirection.Right => "Derecha",
+            QuickLauncherDirection.Left => "Izquierda",
             _ => "Automático",
         });
-        AddLabeled(right, "Columnas", _columns, 0, 0);
-        AddLabeled(right, "Tamaño del icono", _iconSize, 0, 1);
-        AddLabeled(right, "Animación (ms)", _animation, 1, 0);
-        AddLabeled(right, "Dirección", _direction, 1, 1);
+        _layout = Combo(new object[] { "Cuadrícula", "Fila", "Columna" }, launcher.Layout switch
+        {
+            QuickLauncherLayout.Row => "Fila",
+            QuickLauncherLayout.Column => "Columna",
+            _ => "Cuadrícula",
+        });
+        AddLabeled(right, "Distribución", _layout, 0, 0);
+        AddLabeled(right, "Columnas (cuadrícula)", _columns, 0, 1);
+        AddLabeled(right, "Tamaño del icono", _iconSize, 1, 0);
+        AddLabeled(right, "Dirección de despliegue", _direction, 1, 1);
+        AddLabeled(right, "Animación (ms)", _animation, 2, 0);
 
         var listCard = new Border
         {
@@ -290,7 +301,15 @@ internal sealed class QuickAccessManagerWindow : Window
             {
                 "Abajo" => QuickLauncherDirection.Down,
                 "Arriba" => QuickLauncherDirection.Up,
+                "Derecha" => QuickLauncherDirection.Right,
+                "Izquierda" => QuickLauncherDirection.Left,
                 _ => QuickLauncherDirection.Auto,
+            },
+            Layout = (_layout.SelectedItem?.ToString()) switch
+            {
+                "Fila" => QuickLauncherLayout.Row,
+                "Columna" => QuickLauncherLayout.Column,
+                _ => QuickLauncherLayout.Grid,
             },
         });
 

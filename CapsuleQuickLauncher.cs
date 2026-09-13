@@ -10,12 +10,8 @@ namespace Vitals;
 /// </summary>
 internal static unsafe class CapsuleQuickLauncher
 {
-    private const string ToggleClass = "VitalsLauncherToggle";
     private const string PanelClass = "VitalsLauncherPanel";
 
-    private const int ToggleWidth = 24;
-    private const int ToggleHeight = 20;
-    private const int ToggleOverlap = 5;
     private const int PanelGap = 3;
     private const int CellWidth = 88;
     private const int PanelPadding = 10;
@@ -59,7 +55,6 @@ internal static unsafe class CapsuleQuickLauncher
     private static readonly uint Accent = Rgb(42, 209, 190);
 
     private static nint _pill;
-    private static nint _toggle;
     private static nint _panel;
     private static nint _instance;
     private static bool _registered;
@@ -72,6 +67,8 @@ internal static unsafe class CapsuleQuickLauncher
     private static int _panelWidth;
     private static int _panelHeight;
     private static bool _opensUp;
+    private static bool _opensHorizontally;
+    private static bool _opensRight;
     private static int _hoverIndex = -1;
     private static double _animationFactor;
     private static QuickLauncherConfig _config = new();
@@ -135,8 +132,6 @@ internal static unsafe class CapsuleQuickLauncher
     [DllImport("gdi32.dll")] private static extern uint SetTextColor(nint hdc, uint color);
     [DllImport("gdi32.dll")] private static extern int SetBkMode(nint hdc, int mode);
     [DllImport("gdi32.dll")] private static extern bool RoundRect(nint hdc, int left, int top, int right, int bottom, int width, int height);
-    [DllImport("gdi32.dll")] private static extern bool MoveToEx(nint hdc, int x, int y, nint oldPoint);
-    [DllImport("gdi32.dll")] private static extern bool LineTo(nint hdc, int x, int y);
     [DllImport("gdi32.dll")] private static extern nint CreateRoundRectRgn(int left, int top, int right, int bottom, int width, int height);
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHGetFileInfoW")] private static extern nint SHGetFileInfo(string path, uint attrs, ref SHFILEINFO info, uint size, uint flags);
 
@@ -163,29 +158,26 @@ internal static unsafe class CapsuleQuickLauncher
         _hoverIndex = -1;
         if (!_config.Enabled || _items.Count == 0) Collapse(immediate: true);
         Reposition();
-        if (_toggle != 0) InvalidateRect(_toggle, 0, false);
         if (_panel != 0) InvalidateRect(_panel, 0, false);
     }
 
     public static void Reposition()
     {
-        if (_pill == 0 || _toggle == 0 || !GetWindowRect(_pill, out var pill)) return;
+        if (_pill == 0 || !GetWindowRect(_pill, out var pill)) return;
 
         if (!_config.Enabled || _items.Count == 0)
         {
-            ShowWindow(_toggle, SW_HIDE);
             Collapse(immediate: true);
             return;
         }
 
-        int columns = Math.Min(_config.Columns, Math.Max(1, _items.Count));
-        int rows = (_items.Count + columns - 1) / columns;
+        GetGrid(out int columns, out int rows);
         int cellHeight = CellHeight();
         int naturalWidth = PanelPadding * 2 + columns * CellWidth;
 
-        // El drawer nunca debe parecer una ventanita independiente cuando hay
-        // pocos accesos: como mínimo conserva el ancho de la cápsula.
-        _panelWidth = Math.Max(pill.Width, naturalWidth);
+        // El panel toma el tamaño de sus accesos. Un único acceso no debe
+        // convertirse en una franja del ancho completo de la cápsula.
+        _panelWidth = naturalWidth;
         _panelHeight = PanelPadding * 2 + rows * cellHeight;
 
         nint monitor = MonitorFromWindow(_pill, 2);
@@ -195,25 +187,25 @@ internal static unsafe class CapsuleQuickLauncher
         bool roomBelow = pill.Bottom + PanelGap + _panelHeight <= mi.rcWork.Bottom;
         _opensUp = _config.Direction == QuickLauncherDirection.Up
             || (_config.Direction == QuickLauncherDirection.Auto && !roomBelow);
+        _opensHorizontally = _config.Direction is QuickLauncherDirection.Left or QuickLauncherDirection.Right;
+        _opensRight = _config.Direction == QuickLauncherDirection.Right;
 
         _panelWidth = Math.Min(_panelWidth, mi.rcWork.Width);
-        _panelX = Math.Clamp(pill.Right - _panelWidth, mi.rcWork.Left,
-            Math.Max(mi.rcWork.Left, mi.rcWork.Right - _panelWidth));
-        _panelY = _opensUp
-            ? pill.Top - PanelGap - _panelHeight
-            : pill.Bottom + PanelGap;
-
-        // El botón deja de tapar Batería/RAM. Se vuelve una pequeña pestaña
-        // unida al borde de la cápsula y señala físicamente hacia el drawer.
-        int toggleX = pill.Right - ToggleWidth - 12;
-        int toggleY = _opensUp
-            ? pill.Top - ToggleHeight + ToggleOverlap
-            : pill.Bottom - ToggleOverlap;
-        SetWindowPos(_toggle, 0, toggleX, toggleY, ToggleWidth, ToggleHeight,
-            SWP_NOACTIVATE | SWP_NOZORDER);
-        nint toggleRegion = CreateRoundRectRgn(0, 0, ToggleWidth + 1, ToggleHeight + 1, 12, 12);
-        SetWindowRgn(_toggle, toggleRegion, true);
-        ShowWindow(_toggle, SW_SHOWNOACTIVATE);
+        _panelHeight = Math.Min(_panelHeight, mi.rcWork.Height);
+        if (_opensHorizontally)
+        {
+            _panelX = _opensRight ? pill.Right + PanelGap : pill.Left - PanelGap - _panelWidth;
+            _panelY = pill.Bottom - _panelHeight;
+        }
+        else
+        {
+            _panelX = pill.Right - _panelWidth;
+            _panelY = _opensUp
+                ? pill.Top - PanelGap - _panelHeight
+                : pill.Bottom + PanelGap;
+        }
+        _panelX = Math.Clamp(_panelX, mi.rcWork.Left, Math.Max(mi.rcWork.Left, mi.rcWork.Right - _panelWidth));
+        _panelY = Math.Clamp(_panelY, mi.rcWork.Top, Math.Max(mi.rcWork.Top, mi.rcWork.Bottom - _panelHeight));
 
         if (_expanded && _panel != 0)
             SetWindowPos(_panel, 0, _panelX, _panelY, _panelWidth, _panelHeight,
@@ -236,7 +228,6 @@ internal static unsafe class CapsuleQuickLauncher
             _animationFactor = 0;
             _hoverIndex = -1;
             ShowWindow(_panel, SW_HIDE);
-            if (_toggle != 0) InvalidateRect(_toggle, 0, false);
             return;
         }
 
@@ -264,11 +255,12 @@ internal static unsafe class CapsuleQuickLauncher
 
         SetLayeredWindowAttributes(_panel, 0, 0, LWA_ALPHA);
         ShowWindow(_panel, SW_SHOWNOACTIVATE);
-        SetWindowPos(_panel, 0, _panelX,
-            _opensUp ? _panelY + _panelHeight - 1 : _panelY,
-            _panelWidth, 1, SWP_NOACTIVATE | SWP_NOZORDER);
+        int x = _opensHorizontally && !_opensRight ? _panelX + _panelWidth - 1 : _panelX;
+        int y = !_opensHorizontally && _opensUp ? _panelY + _panelHeight - 1 : _panelY;
+        int width = _opensHorizontally ? 1 : _panelWidth;
+        int height = _opensHorizontally ? _panelHeight : 1;
+        SetWindowPos(_panel, 0, x, y, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
         SetTimer(_panel, AnimationTimer, 16, 0);
-        InvalidateRect(_toggle, 0, false);
     }
 
     private static void EnsureWindows()
@@ -276,16 +268,9 @@ internal static unsafe class CapsuleQuickLauncher
         if (!_registered)
         {
             _instance = GetModuleHandle(null);
-            Register(ToggleClass, (nint)(delegate* unmanaged<nint, uint, nint, nint, nint>)&ToggleProc);
             Register(PanelClass, (nint)(delegate* unmanaged<nint, uint, nint, nint, nint>)&PanelProc);
             _registered = true;
         }
-
-        if (_toggle == 0)
-            _toggle = CreateWindowEx(
-                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-                ToggleClass, "", WS_POPUP, 0, 0, ToggleWidth, ToggleHeight,
-                _pill, 0, _instance, 0);
 
         if (_panel == 0)
             _panel = CreateWindowEx(
@@ -316,19 +301,6 @@ internal static unsafe class CapsuleQuickLauncher
     }
 
     [UnmanagedCallersOnly]
-    private static nint ToggleProc(nint hwnd, uint msg, nint wParam, nint lParam)
-    {
-        try
-        {
-            if (msg == WM_LBUTTONUP) { Toggle(); return 0; }
-            if (msg == WM_PAINT) { PaintToggle(hwnd); return 0; }
-            if (msg == WM_DESTROY) { _toggle = 0; return 0; }
-        }
-        catch { }
-        return DefWindowProc(hwnd, msg, wParam, lParam);
-    }
-
-    [UnmanagedCallersOnly]
     private static nint PanelProc(nint hwnd, uint msg, nint wParam, nint lParam)
     {
         try
@@ -351,19 +323,19 @@ internal static unsafe class CapsuleQuickLauncher
         double eased = 1 - Math.Pow(1 - t, 3);
         _animationFactor = _opening ? eased : 1 - eased;
 
-        int h = Math.Max(1, (int)Math.Round(_panelHeight * _animationFactor));
-        int y = _opensUp ? _panelY + _panelHeight - h : _panelY;
-        SetWindowPos(_panel, 0, _panelX, y, _panelWidth, h,
+        int width = _opensHorizontally ? Math.Max(1, (int)Math.Round(_panelWidth * _animationFactor)) : _panelWidth;
+        int height = _opensHorizontally ? _panelHeight : Math.Max(1, (int)Math.Round(_panelHeight * _animationFactor));
+        int x = _opensHorizontally && !_opensRight ? _panelX + _panelWidth - width : _panelX;
+        int y = !_opensHorizontally && _opensUp ? _panelY + _panelHeight - height : _panelY;
+        SetWindowPos(_panel, 0, x, y, width, height,
             SWP_NOACTIVATE | SWP_NOZORDER);
 
-        nint region = CreateRoundRectRgn(0, 0, _panelWidth + 1, h + 1,
+        nint region = CreateRoundRectRgn(0, 0, width + 1, height + 1,
             PanelRadius, PanelRadius);
         SetWindowRgn(_panel, region, true);
 
         byte alpha = (byte)Math.Clamp(120 + 135 * _animationFactor, 0, 255);
         SetLayeredWindowAttributes(_panel, 0, alpha, LWA_ALPHA);
-        InvalidateRect(_toggle, 0, false);
-
         if (t < 1) return;
         KillTimer(_panel, AnimationTimer);
 
@@ -373,43 +345,12 @@ internal static unsafe class CapsuleQuickLauncher
             _animationFactor = 0;
             _hoverIndex = -1;
             ShowWindow(_panel, SW_HIDE);
-            InvalidateRect(_toggle, 0, false);
         }
         else
         {
             _animationFactor = 1;
             SetLayeredWindowAttributes(_panel, 0, 255, LWA_ALPHA);
         }
-    }
-
-    private static void PaintToggle(nint hwnd)
-    {
-        nint dc = BeginPaint(hwnd, out var ps);
-        GetClientRect(hwnd, out var rect);
-
-        nint bg = CreateSolidBrush(Background);
-        nint borderPen = CreatePen(PS_SOLID, 1, Border);
-        nint oldBrush = SelectObject(dc, bg);
-        nint oldPen = SelectObject(dc, borderPen);
-        RoundRect(dc, 0, 0, rect.Right, rect.Bottom, 12, 12);
-
-        nint chevronPen = CreatePen(PS_SOLID, 2, Accent);
-        SelectObject(dc, chevronPen);
-
-        double p = _expanded ? Math.Max(_animationFactor, 0.05) : 0;
-        int sideY = (int)Math.Round(7 + 5 * p);
-        int centerY = (int)Math.Round(12 - 5 * p);
-        int centerX = rect.Width / 2;
-        MoveToEx(dc, centerX - 5, sideY, 0);
-        LineTo(dc, centerX, centerY);
-        LineTo(dc, centerX + 5, sideY);
-
-        SelectObject(dc, oldPen);
-        SelectObject(dc, oldBrush);
-        DeleteObject(chevronPen);
-        DeleteObject(borderPen);
-        DeleteObject(bg);
-        EndPaint(hwnd, ref ps);
     }
 
     private static void PaintPanel(nint hwnd)
@@ -435,9 +376,8 @@ internal static unsafe class CapsuleQuickLauncher
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
 
-        int columns = Math.Min(_config.Columns, Math.Max(1, _items.Count));
+        GetGrid(out int columns, out int rows);
         int cellHeight = CellHeight();
-        int rows = (_items.Count + columns - 1) / columns;
 
         for (int row = 0; row < rows; row++)
         {
@@ -524,7 +464,7 @@ internal static unsafe class CapsuleQuickLauncher
     private static int HitTest(int x, int y)
     {
         if (y < PanelPadding) return -1;
-        int columns = Math.Min(_config.Columns, Math.Max(1, _items.Count));
+        GetGrid(out int columns, out _);
         int cellHeight = CellHeight();
         int row = (y - PanelPadding) / cellHeight;
         if (row < 0) return -1;
@@ -575,6 +515,18 @@ internal static unsafe class CapsuleQuickLauncher
 
     private static int CellHeight() =>
         _config.ShowLabels ? Math.Max(62, _config.IconSize + 31) : Math.Max(50, _config.IconSize + 14);
+
+    private static void GetGrid(out int columns, out int rows)
+    {
+        int count = Math.Max(1, _items.Count);
+        columns = _config.Layout switch
+        {
+            QuickLauncherLayout.Row => count,
+            QuickLauncherLayout.Column => 1,
+            _ => Math.Min(_config.Columns, count),
+        };
+        rows = (count + columns - 1) / columns;
+    }
 
     private static void ReloadIcons(bool clearOnly = false)
     {

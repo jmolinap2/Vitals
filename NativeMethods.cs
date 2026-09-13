@@ -21,6 +21,8 @@ internal static class NativeMethods
     public const uint WM_TIMER = 0x0113;
     public const uint WM_RBUTTONUP = 0x0205;
     public const uint WM_NCHITTEST = 0x0084;
+    public const uint WM_NCLBUTTONDOWN = 0x00A1;
+    public const uint WM_NCLBUTTONUP = 0x00A2;
     public const uint WM_NCRBUTTONUP = 0x00A5;
     public const uint WM_LBUTTONUP = 0x0202;
     public const uint WM_COMMAND = 0x0111;

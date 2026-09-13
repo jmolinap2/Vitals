@@ -68,6 +68,8 @@ internal static class PillWindow
     private static bool _clickThrough;
     private static bool _autoHideFullscreen;
     private static bool _isHidden;
+    private static POINT _pillClickStart;
+    private static bool _pillClickCandidate;
 
     private static List<MetricEntry> _enabledMetrics = [];
     private static int _pillWidth; // ancho lógico (sin escalar) — GDI+ escala todo con una sola transformación
@@ -717,6 +719,26 @@ internal static class PillWindow
 
             case WM_NCHITTEST:
                 return HTCAPTION;
+
+            // La cápsula conserva el arrastre de una barra de título. Si no
+            // hubo desplazamiento, el mismo gesto es un clic para abrir o
+            // cerrar los accesos, sin añadir una flecha ni botón externo.
+            case WM_NCLBUTTONDOWN when wParam == HTCAPTION:
+                GetCursorPos(out _pillClickStart);
+                _pillClickCandidate = true;
+                return DefWindowProc(hWnd, msg, wParam, lParam);
+
+            case WM_NCLBUTTONUP when wParam == HTCAPTION:
+                if (_pillClickCandidate)
+                {
+                    GetCursorPos(out var clickEnd);
+                    int dx = clickEnd.X - _pillClickStart.X;
+                    int dy = clickEnd.Y - _pillClickStart.Y;
+                    if (dx * dx + dy * dy <= 25)
+                        CapsuleQuickLauncher.Toggle();
+                }
+                _pillClickCandidate = false;
+                return 0;
 
             case WM_TRAYICON when lParam == (nint)WM_RBUTTONUP || lParam == (nint)WM_LBUTTONUP:
                 ShowTrayMenu(hWnd);
